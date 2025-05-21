@@ -232,7 +232,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     mean_bg, median_bg, std_bg = sigma_clipped_stats(
         image_data, sigma=2.5, maxiters=5, mask=source_mask_bool | np.isnan(image_data)
     )
-    
+
     # Step 2: Create segmentation map based on initial background estimate
     # Typically threshold is set at median + (N * std) above background
     threshold = median_bg + (sigma * std_bg)  # sigma threshold, adjust as needed
@@ -921,7 +921,7 @@ def create_fits_table_from_csv(f770w_csv_path, f1800w_csv_path=None, output_file
     return table
 
 
-def combine_filter_csv_to_fits(results_folder):
+def combine_filter_csv_to_fits(results_folder, suffix=''):
     """
     Combine filter-specific CSV files into a single FITS table.
 
@@ -929,13 +929,15 @@ def combine_filter_csv_to_fits(results_folder):
     -----------
     output_folder : str
         Base folder containing the results folder with CSV files
+    suffix : str, optional
+        Suffix to the final output table to keep track of versions locally
     """
     # CSV files for each filter
-    f770w_csv = os.path.join(results_folder, 'photometry_table_F770W_v2.csv')
-    f1800w_csv = os.path.join(results_folder, 'photometry_table_F1800W_v2.csv')
+    f770w_csv = os.path.join(results_folder, f'photometry_table_F770W{suffix}.csv')
+    f1800w_csv = os.path.join(results_folder, f'photometry_table_F1800W{suffix}.csv')
 
     # Output FITS file
-    fits_output = os.path.join(results_folder, 'Flux_Aperture_PSFMatched_AperCorr_MIRI_v2.fits')
+    fits_output = os.path.join(results_folder, f'Flux_Aperture_PSFMatched_AperCorr_MIRI{suffix}.fits')
 
     # Create the combined FITS table
     table = create_fits_table_from_csv(f770w_csv, f1800w_csv, fits_output)
