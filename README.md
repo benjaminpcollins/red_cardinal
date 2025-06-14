@@ -1,6 +1,6 @@
 # red\_cardinal
 
-The (`red_cardinal`) repository stores all work related to my master's thesis and supporting Jupyter notebooks, as well as a custom made python package called (`miri_utils/`). The repository serves as both a development environment and a backup, ensuring that all critical code is safely stored and version-controlled. The main focus is on the analysis of galaxies at cosmic noon using data from the JWST, specifically MIRI and NIRCam observations from the PRIMER and COSMOS-Web surveys, as well as NIRSpec data from the BlueJay survey.
+The `red_cardinal` repository stores all work related to my master's thesis and supporting Jupyter notebooks, as well as a custom made python package called `miri_utils/`. The repository serves as both a development environment and a backup, ensuring that all critical code is safely stored and version-controlled. The main focus is on the analysis of galaxies at cosmic noon using data from the JWST, specifically MIRI and NIRCam observations from the PRIMER and COSMOS-Web surveys, as well as NIRSpec data from the BlueJay survey.
 
 ## 📁 Project Structure
 
@@ -21,7 +21,7 @@ red_cardinal/
 ├── README.md
 ├── rotate_fits.ipynb
 └── webbpsf_tutorial.ipynb
-
+```
 ## 🛠️ Development Notes
 
 * Make sure to periodically sync this repository to GitHub to avoid data loss.
@@ -35,4 +35,5 @@ This project is intended for personal academic use. If you wish to use it for ot
 ## 📫 Contact
 
 For questions or collaborations, feel free to reach out via email or GitHub.
+
 benjaminphilip.collins@studio.unibo.it
