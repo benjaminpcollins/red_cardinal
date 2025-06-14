@@ -30,7 +30,7 @@ Example usage
 
 Author: Benjamin P. Collins
 Date: May 15, 2025
-Version: 1.0
+Version: 2.0
 """
 
 import os
@@ -47,10 +47,12 @@ from matplotlib.patches import Ellipse
 from astropy.io import fits
 from astropy.wcs import FITSFixedWarning
 from astropy.table import Table, MaskedColumn
-from astropy.stats import SigmaClip
+from astropy.stats import SigmaClip, sigma_clipped_stats
 from photutils.aperture import EllipticalAperture, EllipticalAnnulus, aperture_photometry
+from photutils.segmentation import detect_sources, SegmentationImage
 
-from .cutouts import load_cutout
+
+from .cutout_tools import load_cutout
 
 # Suppress common WCS-related warnings that don't affect functionality
 warnings.simplefilter("ignore", category=FITSFixedWarning)
@@ -97,22 +99,10 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=Fal
     scale_factor = nircam_scale / miri_scale
     
     # --- Specify parameters for the ellips ---
-    width = row['Apr_A'] * scale_factor
-    height = row['Apr_B'] * scale_factor
+    width = row['Apr_A'] * scale_factor * 2
+    height = row['Apr_B'] * scale_factor * 2
     theta = -row['Apr_Theta']
     theta_new = ((theta - angle) % 180) * u.deg
-    
-    # --- Create region file and check if folder exists ---
-    os.makedirs(output_folder, exist_ok=True)
-    reg_file = os.path.join(output_folder, f'regions/{galaxy_id}_{survey}{obs}_aperture.reg') 
-    
-    # --- Write to DS9-compatible region file ---
-    with open(reg_file, "w") as fh:
-        fh.write("# Region file format: DS9 version 4.1\n")
-        fh.write("global color=red dashlist=8 3 width=2 font=\"helvetica 10 normal\" "
-                "select=1 highlite=1 dash=0 fixed=0 edit=1 move=1 delete=1 include=1 source=1\n")
-        fh.write("image\n")
-        fh.write(f"ellipse({miri_x:.2f},{miri_y:.2f},{width:.2f},{height:.2f},{theta_new:.2f})\n")
     
     if save_plot:
         
@@ -164,9 +154,9 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=Fal
         ax.legend(loc='upper right')
         
         # Save figure
-        png_path = os.path.join(output_folder, f'masks/{galaxy_id}_{survey}{obs}_aperture_overlay.png')
-        plt.savefig(png_path, dpi=150, bbox_inches='tight')
-        plt.close(fig)
+        #png_path = os.path.join(output_folder, f'masks/{galaxy_id}_{survey}{obs}_aperture_overlay.png')
+        #plt.savefig(png_path, dpi=150, bbox_inches='tight')
+        #plt.close(fig)
         
     # Collect modified aperture data
     aperture_info = {          
@@ -183,8 +173,8 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=Fal
 
 
 
-def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma=3.0, 
-                        annulus_factor=3.0, fig_path=None):
+def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma, 
+                        annulus_factor, fig_path=None):
     """
     Estimate background using a global 2D plane fit, then extract statistics from 
     an elliptical annulus.
@@ -237,19 +227,30 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     source_mask = source_aperture.to_mask(method='center').to_image(image_data.shape)
     source_mask_bool = source_mask.astype(bool)
     
-    # Apply initial source mask to the data
-    masked_data = np.copy(image_data)
-    masked_data[source_mask_bool] = np.nan
-    
-    # Apply sigma clipping to the remaining background
-    sigma_clip = SigmaClip(sigma=sigma)
-    clipped_data = sigma_clip(masked_data)
-    
-    # Create a mask for sigma-clipped pixels (clipped_data.mask is True for clipped values)
-    sigma_clipped_mask = clipped_data.mask if hasattr(clipped_data, 'mask') else np.isnan(clipped_data)
-    
-    # Create a global mask for all valid background pixels (not in source, not sigma-clipped)
-    global_mask = ~source_mask_bool & ~np.isnan(image_data) & ~sigma_clipped_mask
+    # Step 1: Get initial background estimate using sigma clipping
+    # This doesn't require knowing sources beforehand
+    mean_bg, median_bg, std_bg = sigma_clipped_stats(
+        image_data, sigma=2.5, maxiters=5, mask=source_mask_bool | np.isnan(image_data)
+    )
+
+    # Step 2: Create segmentation map based on initial background estimate
+    # Typically threshold is set at median + (N * std) above background
+    threshold = median_bg + (sigma * std_bg)  # sigma threshold, adjust as needed
+    masked_for_segm = np.copy(image_data)
+    masked_for_segm[source_mask_bool] = median_bg
+    segm = detect_sources(masked_for_segm, threshold, npixels=5)
+
+    # Convert segmentation to a boolean mask (True where sources are detected)
+    if segm is not None:
+        segm_mask = segm.data > 0
+    else:
+        segm_mask = np.zeros_like(image_data, dtype=bool)
+
+    # Step 3: Combine the known source mask with the segmentation mask
+    combined_mask = source_mask_bool | segm_mask | np.isnan(image_data)
+
+    # Create a global mask for all valid background pixels (not in any source)
+    global_mask = ~combined_mask
     
     # Define indices for the full image
     y, x = np.indices(image_data.shape)
@@ -273,58 +274,58 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     
     # Define the background region
     region_name = "Annulus"
-    
-    # Set minimum and maximum sizes for the annulus
-    min_pixels = 300  # Minimum number of pixels in the annulus for reliable background estimation
     max_annulus_size = 35  # Roughly half of the 75x75 image size for large apertures
-    step_factor = 0.15  # Step size for expanding the annulus
-    max_attempts = 10
-    attempt = 0
+    base_factor = 2.2
+    """
+    # Adjust annuli for very large galaxies
+    if galaxy_id in ['9871', '11136', '11137', '11494', '12340', '']:
+        a_in = base_factor * a * 0.8
+        b_in = base_factor * b * 0.8
     
-    # Start with a slightly larger annulus than the source aperture
-    a_in = a * 2
-    b_in = b * 2
-    a_out = a_in * annulus_factor
-    b_out = b_in * annulus_factor
+    # Adjust annuli for very elliptical galaxies
+    elif galaxy_id in ['12340', '12717', '17793', '20397']:
+        a_in = base_factor * a * 0.8
+        b_in = base_factor * b
     
-    if galaxy_id in ['12020', '17669', '7136']:
-        a_in *= 1.2
-        b_in *= 1.2
-        a_out *= 1.3
-        b_out *= 1.3
-    if galaxy_id in ['9871', '11136', '11137', '11494', '12340', '12717', '17793', '16874', '17517', '20397']:
-        a_out *= 0.7
-        b_out *= 0.7
-    
-    # Adjust the outer size until the annulus contains enough pixels
-    while attempt < max_attempts:
-        # Create the annulus
-        annulus = EllipticalAnnulus(
-            positions=(x_center, y_center),
-            a_in=a_in,
-            b_in=b_in,
-            a_out=min(a_out, max_annulus_size),
-            b_out=min(b_out, max_annulus_size),
-            theta=theta
-        )
+    else:
+        a_in = base_factor * a
+        b_in = base_factor * b
         
-        # Create mask for the annulus region
-        annulus_mask = annulus.to_mask(method='center').to_image(image_data.shape)
-        background_region_mask = annulus_mask.astype(bool) & ~np.isnan(image_data)
-        pixel_count = np.sum(background_region_mask)
+    #elif galaxy_id in ['17669']:
+    #    a_in = base_factor * a * 1.2
+    #    b_in = base_factor * b * 1.2
+    
+    a_out = max(a_in * annulus_factor, max_annulus_size)
+    b_out = max(b_in * annulus_factor, max_annulus_size)
+    """
+    
+    ecc = a/b
+    
+    a_in = a + 8
+    b_in = b + 8/ecc
+    
+    scale_factor = max_annulus_size / a_in
+    
+    a_out = a_in * scale_factor
+    b_out = b_in * scale_factor + 2*ecc   # account for eccentricity
+    
+    
+    # Create the annulus
+    annulus = EllipticalAnnulus(
+        positions=(x_center, y_center),
+        a_in=a_in,
+        b_in=b_in,
+        a_out=a_out,
+        b_out=b_out,
+        theta=theta
+    )
+    
+    # Create mask for the annulus region
+    annulus_mask = annulus.to_mask(method='center').to_image(image_data.shape)
+    background_region_mask = annulus_mask.astype(bool) & ~np.isnan(image_data)
 
-        # If the annulus has enough pixels, break the loop
-        if pixel_count >= min_pixels:
-            break
-        
-        # Expand the annulus for the next attempt
-        a_out += a_in * step_factor
-        b_out += b_in * step_factor
-        attempt += 1
-        
-    
     # Gather all the pixels within the background region that were NOT sigma-clipped
-    bkg_region_valid_pixels = ~sigma_clipped_mask & background_region_mask
+    bkg_region_valid_pixels = ~segm_mask & background_region_mask
     residual_data = image_data - background_plane
     num_valid_pixels = np.sum(bkg_region_valid_pixels)
     
@@ -337,14 +338,14 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     background_median = np.median(bkg_plane_values)
     
     # Print background statistics
-    print(f"Background Statistics:")
-    print(f"  Global 2D Plane coefficients: a={alpha:.6e}, b={beta:.6e}, c={gamma:.6f}")
-    print(f"  {region_name} region background median: {background_median:.6f}")
-    print(f"  {region_name} region background std dev: {background_std:.6f}")
+    #print(f"Background Statistics:")
+    #print(f"  Global 2D Plane coefficients: a={alpha:.6e}, b={beta:.6e}, c={gamma:.6f}")
+    #print(f"  {region_name} region background median: {background_median:.6f}")
+    #print(f"  {region_name} region background std dev: {background_std:.6f}")
     
     # Create a mask visualisation
     mask_vis = np.zeros_like(image_data, dtype=int)
-    mask_vis[~sigma_clipped_mask] = 1  # Pixels excluded by sigma clipping
+    mask_vis[~combined_mask] = 1  # Excluded pixels
     mask_vis[background_region_mask] = 2  # Pixels in the annulus/rectangle
     mask_vis[source_mask_bool] = 3  # Source pixels
     
@@ -356,7 +357,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
         'background_plane': background_plane,
         'background_subtracted': residual_data,
         'mask_vis': mask_vis,
-        'sigma_clipped_mask': sigma_clipped_mask,
+        'segmentation_mask': segm_mask,
         'background_region_mask': background_region_mask,
         'source_mask': source_mask_bool,
         'aperture_params': aperture_params,
@@ -392,6 +393,7 @@ def visualise_background(vis_data, fig_path=None):
     image_data = vis_data['original_data']
     background_plane = vis_data['background_plane']
     background_subtracted = vis_data['background_subtracted']
+    segm_mask = vis_data['segmentation_mask']
     mask_vis = vis_data['mask_vis']
     aperture_params = vis_data['aperture_params']
     sigma = vis_data['sigma']
@@ -435,9 +437,10 @@ def visualise_background(vis_data, fig_path=None):
         b_out = vis_data['b_out'],
         theta = theta
     )
-    annulus.plot(ax=axes[0, 0], color='white', lw=1.5)
+    # Overlay the segmentation mask as white outlines
+    axes[0, 0].contour(segm_mask, levels=[0.5], colors='blue', linewidths=1.5)
         
-    axes[0, 0].set_title("Original Data with Aperture and Annulus")
+    axes[0, 0].set_title("Original Data with Aperture and Masked Regions")
     
     # Background-subtracted data
     vmin2 = np.nanpercentile(background_subtracted, 5)
@@ -623,7 +626,7 @@ def measure_flux(image_data, error_map, background_median, background_std, apert
 
 # --- Main Loop ---
 
-def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, create_plots=False):
+def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, suffix='', fig_path=None, sigma=3.0, annulus_factor=3.0):
     """
     Main function to perform photometry on a list of cutout files.
     
@@ -676,11 +679,8 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, cr
         #vis_path = os.path.join(output_folder, 'mosaic_fits')
         #os.makedirs(vis_path, exist_ok=True)
         
-        if create_plots:
-            fig_path = os.path.join(output_folder, 'mosaic_plots')
+        if fig_path is not None:
             os.makedirs(fig_path, exist_ok=True)
-        else:
-            fig_path = None
         
         # Estimate background with 2D-plane fit
         background_median, background_std = estimate_background(
@@ -689,7 +689,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, cr
             image_data, 
             aperture_params,
             sigma=sigma, 
-            annulus_factor=3.0, 
+            annulus_factor=annulus_factor, 
             fig_path=fig_path
         )                                                                   
         
@@ -706,10 +706,10 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, cr
         correction_factor = calculate_aperture_correction(psf_data, aperture_params)
 
         # Apply aperture correction
-        corrected_flux = flux_measurements['flux'] #* correction_factor
-        corrected_flux_error = flux_measurements['flux_error'] #* correction_factor
-        corrected_background_flux = flux_measurements['background_flux'] #* correction_factor
-        corrected_background_error = background_std #* correction_factor
+        corrected_flux = flux_measurements['flux'] * correction_factor
+        corrected_flux_error = flux_measurements['flux_error'] * correction_factor
+        corrected_background_flux = flux_measurements['background_flux'] * correction_factor
+        corrected_background_error = background_std * correction_factor
         
         # --- Convert fluxes into AB magnitudes ---
         if corrected_flux > 0:
@@ -725,6 +725,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, cr
             'Flux_BKG': corrected_background_flux,
             'Flux_BKG_Err': corrected_background_error,
             'AB_Mag': ab_mag,
+            'Apr_Corr': correction_factor,
             'N_PIX': flux_measurements['pixel_count'],
             'Apr_A': aperture_params['a'] * 2,  # Convert back to diameter for output
             'Apr_B': aperture_params['b'] * 2,  # Convert back to diameter for output
@@ -735,7 +736,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, cr
     
     # Save to output table (assuming it's a pandas DataFrame)
     os.makedirs(os.path.join(output_folder, 'results'), exist_ok=True)
-    output_path = os.path.join(output_folder, f'results/photometry_table_{filter_name}.csv')
+    output_path = os.path.join(output_folder, f'results/photometry_table_{filter_name}{suffix}.csv')
     output_df = pd.DataFrame(results)
     output_df.to_csv(output_path, index=False)
     
@@ -840,10 +841,10 @@ def create_fits_table_from_csv(f770w_csv_path, f1800w_csv_path=None, output_file
 
     # These columns will have 2 values per row (one for each filter)
     array_columns = ['Flux', 'Flux_Err', 'Image_Err', 'Flux_BKG', 'Flux_BKG_Err', 
-                        'AB_Mag', 'N_PIX']
+                        'AB_Mag', 'Apr_Corr']
 
     # These columns will be scalar (one value per galaxy)
-    scalar_columns = ['Apr_A', 'Apr_B', 'Apr_Xcenter', 'Apr_Ycenter', 'Apr_Theta']
+    scalar_columns = ['N_PIX', 'Apr_A', 'Apr_B', 'Apr_Xcenter', 'Apr_Ycenter', 'Apr_Theta']
 
     # Prepare data for each column
     column_data = {col: [] for col in array_columns + scalar_columns}
@@ -920,7 +921,7 @@ def create_fits_table_from_csv(f770w_csv_path, f1800w_csv_path=None, output_file
     return table
 
 
-def combine_filter_csv_to_fits(results_folder):
+def combine_filter_csv_to_fits(results_folder, suffix=''):
     """
     Combine filter-specific CSV files into a single FITS table.
 
@@ -928,13 +929,15 @@ def combine_filter_csv_to_fits(results_folder):
     -----------
     output_folder : str
         Base folder containing the results folder with CSV files
+    suffix : str, optional
+        Suffix to the final output table to keep track of versions locally
     """
     # CSV files for each filter
-    f770w_csv = os.path.join(results_folder, 'photometry_table_F770W.csv')
-    f1800w_csv = os.path.join(results_folder, 'photometry_table_F1800W.csv')
+    f770w_csv = os.path.join(results_folder, f'photometry_table_F770W{suffix}.csv')
+    f1800w_csv = os.path.join(results_folder, f'photometry_table_F1800W{suffix}.csv')
 
     # Output FITS file
-    fits_output = os.path.join(results_folder, 'Flux_Aperture_PSFMatched_AperCorr_MIRI.fits')
+    fits_output = os.path.join(results_folder, f'Flux_Aperture_PSFMatched_AperCorr_MIRI{suffix}.fits')
 
     # Create the combined FITS table
     table = create_fits_table_from_csv(f770w_csv, f1800w_csv, fits_output)

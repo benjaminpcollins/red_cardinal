@@ -44,7 +44,7 @@ The functions in this module assume the use of PRIMER or COSMOS-Web data product
 
 Author: Benjamin P. Collins
 Date: May 15, 2025
-Version: 1.0
+Version: 2.0
 """
 
 import numpy as np
@@ -60,7 +60,7 @@ from astropy.wcs import WCS, FITSFixedWarning
 import astropy.units as u
 from astropy.nddata import Cutout2D
 from photutils import centroids
-from .cutouts import load_cutout
+from .cutout_tools import load_cutout
 
 # Suppress common WCS-related warnings that don't affect functionality
 warnings.simplefilter("ignore", category=FITSFixedWarning)

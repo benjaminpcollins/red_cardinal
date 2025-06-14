@@ -16,7 +16,7 @@ Dependencies:
 
 Author: Benjamin P. Collins
 Date: May 15, 2025
-Version: 1.0
+Version: 2.0
 """
 
 import astropy.units as u
