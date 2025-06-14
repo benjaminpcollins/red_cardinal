@@ -706,10 +706,10 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
         correction_factor = calculate_aperture_correction(psf_data, aperture_params)
 
         # Apply aperture correction
-        corrected_flux = flux_measurements['flux'] * correction_factor
-        corrected_flux_error = flux_measurements['flux_error'] * correction_factor
-        corrected_background_flux = flux_measurements['background_flux'] * correction_factor
-        corrected_background_error = background_std * correction_factor
+        corrected_flux = flux_measurements['flux'] #* correction_factor
+        corrected_flux_error = flux_measurements['flux_error'] #* correction_factor
+        corrected_background_flux = flux_measurements['background_flux'] #* correction_factor
+        corrected_background_error = background_std #* correction_factor
         
         # --- Convert fluxes into AB magnitudes ---
         if corrected_flux > 0:
@@ -736,7 +736,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
     
     # Save to output table (assuming it's a pandas DataFrame)
     os.makedirs(os.path.join(output_folder, 'results'), exist_ok=True)
-    output_path = os.path.join(output_folder, f'results/photometry_table_{filter_name}{suffix}.csv')
+    output_path = os.path.join(output_folder, f'results/phot_table_{filter_name}{suffix}.csv')
     output_df = pd.DataFrame(results)
     output_df.to_csv(output_path, index=False)
     
@@ -921,25 +921,360 @@ def create_fits_table_from_csv(f770w_csv_path, f1800w_csv_path=None, output_file
     return table
 
 
-def combine_filter_csv_to_fits(results_folder, suffix=''):
+def combine_filter_csv_to_fits(f770w_fname, f1800w_fname, fits_table_name):
     """
     Combine filter-specific CSV files into a single FITS table.
 
     Parameters:
     -----------
-    output_folder : str
-        Base folder containing the results folder with CSV files
+    f770w_fname : str
+        Filename of the F770W CSV table containing the aperture photometry results
+    f1800w_fname : str
+        Filename of the F1800W CSV table containing the aperture photometry results
+    fits_table_name : str
+        Filename of the output FITS table
     suffix : str, optional
         Suffix to the final output table to keep track of versions locally
     """
+    # Define results folder as a static variable
+    results_folder = '/home/bpc/University/master/Red_Cardinal/photometry/results/'
+    
     # CSV files for each filter
-    f770w_csv = os.path.join(results_folder, f'photometry_table_F770W{suffix}.csv')
-    f1800w_csv = os.path.join(results_folder, f'photometry_table_F1800W{suffix}.csv')
+    f770w_csv = os.path.join(results_folder, f770w_fname)
+    f1800w_csv = os.path.join(results_folder, f1800w_fname)
 
     # Output FITS file
-    fits_output = os.path.join(results_folder, f'Flux_Aperture_PSFMatched_AperCorr_MIRI{suffix}.fits')
+    fits_output = os.path.join(results_folder, fits_table_name)
 
     # Create the combined FITS table
     table = create_fits_table_from_csv(f770w_csv, f1800w_csv, fits_output)
 
     return table
+
+
+
+
+
+def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summary_doc_path):
+    """
+    Compare and contrast two photometric tables WITHOUT APERTURE CORRECTION APPLIED
+    and create a comprehensive summary plot of all important statistics and write
+    the output to a text file.
+
+    Args:
+        table_small_path (str):
+            Path to table using small apertures
+        table_big_path (str): 
+            Path to table using big apertures
+        fig_path (str):
+            Output path of the summary plot
+        summary_doc_path (str): 
+            Output path of the summary text file
+    """
+    # Enhanced Aperture Photometry Comparison
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from astropy.table import Table
+    from matplotlib.patches import Rectangle
+    import seaborn as sns
+
+    # Set style for better plots
+    plt.style.use('default')
+    sns.set_palette("husl")
+
+    # Load the two tables
+    table_small_path = '/home/bpc/University/master/Red_Cardinal/photometry/results/Flux_SmallAperture_NoCorr_MIRI.fits'
+    table_big_path = '/home/bpc/University/master/Red_Cardinal/photometry/results/Flux_BigAperture_NoCorr_MIRI.fits'
+
+    table_small = Table.read(table_small_path)
+    table_big = Table.read(table_big_path)
+
+    # Convert ID columns to string for alignment
+    ids1 = [id.decode() if isinstance(id, bytes) else str(id) for id in table_small['ID']]
+    ids2 = [id.decode() if isinstance(id, bytes) else str(id) for id in table_big['ID']]
+
+    # Match common IDs
+    common_ids = sorted(set(ids1) & set(ids2))
+    print(f"Found {len(common_ids)} common galaxies")
+
+    # Prepare data structures
+    bands = ['F770W', 'F1800W']
+    data_comparison = {
+        'ID': [],
+        'Band': [],
+        'Flux_Small_Raw': [],
+        'Flux_Big_Raw': [],
+        'Flux_Small_Corrected': [],
+        'Flux_Big_Corrected': [],
+        'Apr_Corr_Small': [],
+        'Apr_Corr_Big': [],
+        'Flux_Ratio': [],
+        'Corrected_Flux_Ratio': [],
+        'Flux_Difference': [],
+        'Corrected_Flux_Difference': []
+    }
+
+    # Collect all data for comprehensive analysis
+    for idx, band in enumerate([0, 1]):  # F770W = 0, F1800W = 1
+        for gid in common_ids:
+            i1 = ids1.index(gid)
+            i2 = ids2.index(gid)
+
+            # Raw fluxes (convert to µJy)
+            flux_small = table_small['Flux'][i1][idx] * 1e6
+            flux_big = table_big['Flux'][i2][idx] * 1e6
+            
+            # Aperture corrections
+            corr_small = table_small['Apr_Corr'][i1][idx] if 'Apr_Corr' in table_small.colnames else np.nan
+            corr_big = table_big['Apr_Corr'][i2][idx] if 'Apr_Corr' in table_big.colnames else np.nan
+            
+            # Skip if any crucial value is invalid
+            if not (np.isfinite(flux_small) and np.isfinite(flux_big) and 
+                    np.isfinite(corr_small) and np.isfinite(corr_big)):
+                continue
+                
+            # Calculate corrected fluxes
+            flux_small_corr = flux_small * corr_small
+            flux_big_corr = flux_big * corr_big
+            
+            # Store all data
+            data_comparison['ID'].append(gid)
+            data_comparison['Band'].append(bands[idx])
+            data_comparison['Flux_Small_Raw'].append(flux_small)
+            data_comparison['Flux_Big_Raw'].append(flux_big)
+            data_comparison['Flux_Small_Corrected'].append(flux_small_corr)
+            data_comparison['Flux_Big_Corrected'].append(flux_big_corr)
+            data_comparison['Apr_Corr_Small'].append(corr_small)
+            data_comparison['Apr_Corr_Big'].append(corr_big)
+            data_comparison['Flux_Ratio'].append(flux_big / flux_small)
+            data_comparison['Corrected_Flux_Ratio'].append(flux_big_corr / flux_small_corr)
+            data_comparison['Flux_Difference'].append(flux_big - flux_small)
+            data_comparison['Corrected_Flux_Difference'].append(flux_big_corr - flux_small_corr)
+
+    # Convert to arrays for easier handling
+    for key in data_comparison:
+        data_comparison[key] = np.array(data_comparison[key])
+
+    # Create comprehensive comparison plots
+    fig = plt.figure(figsize=(20, 16))
+
+    # 1. Raw vs Corrected Flux Comparison (Scatter plots)
+    for i, band in enumerate(bands):
+        mask = data_comparison['Band'] == band
+        
+        # Raw fluxes
+        ax1 = plt.subplot(4, 4, 1 + i*2)
+        plt.scatter(data_comparison['Flux_Small_Raw'][mask], 
+                    data_comparison['Flux_Big_Raw'][mask], 
+                    alpha=0.7, s=30)
+        
+        # Add 1:1 line
+        min_flux = min(np.min(data_comparison['Flux_Small_Raw'][mask]), 
+                    np.min(data_comparison['Flux_Big_Raw'][mask]))
+        max_flux = max(np.max(data_comparison['Flux_Small_Raw'][mask]), 
+                    np.max(data_comparison['Flux_Big_Raw'][mask]))
+        plt.plot([min_flux, max_flux], [min_flux, max_flux], 'r--', alpha=0.8, label='1:1')
+        
+        plt.xlabel(f'{band} Small Aperture Raw Flux [µJy]')
+        plt.ylabel(f'{band} Large Aperture Raw Flux [µJy]')
+        plt.title(f'{band} Raw Flux Comparison')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Corrected fluxes
+        ax2 = plt.subplot(4, 4, 2 + i*2)
+        plt.scatter(data_comparison['Flux_Small_Corrected'][mask], 
+                    data_comparison['Flux_Big_Corrected'][mask], 
+                    alpha=0.7, s=30, color='orange')
+        
+        min_flux_corr = min(np.min(data_comparison['Flux_Small_Corrected'][mask]), 
+                            np.min(data_comparison['Flux_Big_Corrected'][mask]))
+        max_flux_corr = max(np.max(data_comparison['Flux_Small_Corrected'][mask]), 
+                            np.max(data_comparison['Flux_Big_Corrected'][mask]))
+        plt.plot([min_flux_corr, max_flux_corr], [min_flux_corr, max_flux_corr], 'r--', alpha=0.8, label='1:1')
+        
+        plt.xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
+        plt.ylabel(f'{band} Large Aperture Corrected Flux [µJy]')
+        plt.title(f'{band} Corrected Flux Comparison')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+    # 2. Flux Ratios (Large/Small aperture)
+    for i, band in enumerate(bands):
+        mask = data_comparison['Band'] == band
+        
+        # Raw flux ratios
+        ax3 = plt.subplot(4, 4, 5 + i*2)
+        plt.hist(data_comparison['Flux_Ratio'][mask], bins=25, alpha=0.7, 
+                color='skyblue', edgecolor='black')
+        plt.axvline(1.0, color='red', linestyle='--', linewidth=2, label='Unity')
+        plt.axvline(np.median(data_comparison['Flux_Ratio'][mask]), 
+                    color='orange', linestyle='-', linewidth=2, label='Median')
+        plt.xlabel('Flux Ratio (Large/Small)')
+        plt.ylabel('Number of Sources')
+        plt.title(f'{band} Raw Flux Ratio Distribution')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Add statistics text
+        ratio_stats = f"Median: {np.median(data_comparison['Flux_Ratio'][mask]):.3f}\n" + \
+                    f"Mean: {np.mean(data_comparison['Flux_Ratio'][mask]):.3f}\n" + \
+                    f"Std: {np.std(data_comparison['Flux_Ratio'][mask]):.3f}"
+        plt.text(0.95, 0.95, ratio_stats, transform=plt.gca().transAxes, 
+                verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # Corrected flux ratios
+        ax4 = plt.subplot(4, 4, 6 + i*2)
+        plt.hist(data_comparison['Corrected_Flux_Ratio'][mask], bins=25, alpha=0.7, 
+                color='lightcoral', edgecolor='black')
+        plt.axvline(1.0, color='red', linestyle='--', linewidth=2, label='Unity')
+        plt.axvline(np.median(data_comparison['Corrected_Flux_Ratio'][mask]), 
+                    color='orange', linestyle='-', linewidth=2, label='Median')
+        plt.xlabel('Corrected Flux Ratio (Large/Small)')
+        plt.ylabel('Number of Sources')
+        plt.title(f'{band} Corrected Flux Ratio Distribution')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Add statistics text
+        corr_ratio_stats = f"Median: {np.median(data_comparison['Corrected_Flux_Ratio'][mask]):.3f}\n" + \
+                        f"Mean: {np.mean(data_comparison['Corrected_Flux_Ratio'][mask]):.3f}\n" + \
+                        f"Std: {np.std(data_comparison['Corrected_Flux_Ratio'][mask]):.3f}"
+        plt.text(0.95, 0.95, corr_ratio_stats, transform=plt.gca().transAxes, 
+                verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # 3. Aperture Correction Comparison
+    for i, band in enumerate(bands):
+        mask = data_comparison['Band'] == band
+        
+        ax5 = plt.subplot(4, 4, 9 + i*2)
+        plt.scatter(data_comparison['Apr_Corr_Small'][mask], 
+                    data_comparison['Apr_Corr_Big'][mask], 
+                    alpha=0.7, s=30, color='green')
+        
+        min_corr = min(np.min(data_comparison['Apr_Corr_Small'][mask]), 
+                    np.min(data_comparison['Apr_Corr_Big'][mask]))
+        max_corr = max(np.max(data_comparison['Apr_Corr_Small'][mask]), 
+                    np.max(data_comparison['Apr_Corr_Big'][mask]))
+        plt.plot([min_corr, max_corr], [min_corr, max_corr], 'r--', alpha=0.8, label='1:1')
+        
+        plt.xlabel(f'{band} Small Aperture Correction')
+        plt.ylabel(f'{band} Large Aperture Correction')
+        plt.title(f'{band} Aperture Corrections')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Corrected flux differences
+        ax6 = plt.subplot(4, 4, 10 + i*2)
+        plt.hist(data_comparison['Corrected_Flux_Difference'][mask], bins=25, alpha=0.7, 
+                color='purple', edgecolor='black')
+        plt.axvline(0, color='red', linestyle='--', linewidth=2, label='Zero')
+        plt.axvline(np.median(data_comparison['Corrected_Flux_Difference'][mask]), 
+                    color='orange', linestyle='-', linewidth=2, label='Median')
+        plt.xlabel('Corrected Flux Difference [µJy]')
+        plt.ylabel('Number of Sources')
+        plt.title(f'{band} Corrected Flux Difference (Large - Small)')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        # Add statistics text
+        diff_stats = f"Median: {np.median(data_comparison['Corrected_Flux_Difference'][mask]):.2f} µJy\n" + \
+                    f"Mean: {np.mean(data_comparison['Corrected_Flux_Difference'][mask]):.2f} µJy\n" + \
+                    f"Std: {np.std(data_comparison['Corrected_Flux_Difference'][mask]):.2f} µJy"
+        plt.text(0.95, 0.95, diff_stats, transform=plt.gca().transAxes, 
+                verticalalignment='top', horizontalalignment='right',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    # 4. Flux vs Ratio relationships (to identify systematic trends)
+    for i, band in enumerate(bands):
+        mask = data_comparison['Band'] == band
+        
+        ax7 = plt.subplot(4, 4, 13 + i*2)
+        plt.scatter(data_comparison['Flux_Small_Raw'][mask], 
+                    data_comparison['Flux_Ratio'][mask], 
+                    alpha=0.6, s=30, c=data_comparison['Apr_Corr_Small'][mask], 
+                    cmap='viridis')
+        plt.colorbar(label='Small Aperture Correction')
+        plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')
+        plt.xlabel(f'{band} Small Aperture Raw Flux [µJy]')
+        plt.ylabel('Flux Ratio (Large/Small)')
+        plt.title(f'{band} Flux Ratio vs Brightness')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        
+        ax8 = plt.subplot(4, 4, 14 + i*2)
+        plt.scatter(data_comparison['Flux_Small_Corrected'][mask], 
+                    data_comparison['Corrected_Flux_Ratio'][mask], 
+                    alpha=0.6, s=30, c=data_comparison['Apr_Corr_Big'][mask], 
+                    cmap='plasma')
+        plt.colorbar(label='Large Aperture Correction')
+        plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')
+        plt.xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
+        plt.ylabel('Corrected Flux Ratio (Large/Small)')
+        plt.title(f'{band} Corrected Flux Ratio vs Brightness')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+    plt.suptitle('Comprehensive Aperture Photometry Comparison', fontsize=16, y=0.98)
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.95)
+    plt.savefig(fig_path, dpi=150)
+    plt.show()
+    plt.close()
+
+    with open(summary_doc_path, "w") as file:
+        file.write("\n" + "="*80 + "\n")
+        file.write("COMPREHENSIVE APERTURE COMPARISON SUMMARY\n")
+        file.write("="*80 + "\n")
+        
+        for band in bands:
+            mask = data_comparison['Band'] == band
+            file.write(f"\n📊 {band} FILTER:\n")
+            file.write("-" * 40 + "\n")
+            
+            # Raw flux statistics
+            flux_ratio_med = np.median(data_comparison['Flux_Ratio'][mask])
+            flux_ratio_mean = np.mean(data_comparison['Flux_Ratio'][mask])
+            flux_ratio_std = np.std(data_comparison['Flux_Ratio'][mask])
+            
+            file.write("Raw Flux Ratios (Large/Small):\n")
+            file.write(f"  Median: {flux_ratio_med:.3f} ± {flux_ratio_std:.3f}\n")
+            file.write(f"  Mean:   {flux_ratio_mean:.3f}\n")
+            file.write(f"  Range:  {np.min(data_comparison['Flux_Ratio'][mask]):.3f} - {np.max(data_comparison['Flux_Ratio'][mask]):.3f}\n")
+            
+            # Corrected flux statistics
+            corr_ratio_med = np.median(data_comparison['Corrected_Flux_Ratio'][mask])
+            corr_ratio_mean = np.mean(data_comparison['Corrected_Flux_Ratio'][mask])
+            corr_ratio_std = np.std(data_comparison['Corrected_Flux_Ratio'][mask])
+            
+            file.write("\nCorrected Flux Ratios (Large/Small):\n")
+            file.write(f"  Median: {corr_ratio_med:.3f} ± {corr_ratio_std:.3f}\n")
+            file.write(f"  Mean:   {corr_ratio_mean:.3f}\n")
+            file.write(f"  Range:  {np.min(data_comparison['Corrected_Flux_Ratio'][mask]):.3f} - {np.max(data_comparison['Corrected_Flux_Ratio'][mask]):.3f}\n")
+            
+            # Aperture correction comparison
+            small_corr_med = np.median(data_comparison['Apr_Corr_Small'][mask])
+            big_corr_med = np.median(data_comparison['Apr_Corr_Big'][mask])
+            
+            file.write("\nAperture Corrections:\n")
+            file.write(f"  Small aperture median: {small_corr_med:.3f}\n")
+            file.write(f"  Large aperture median: {big_corr_med:.3f}\n")
+            file.write(f"  Difference (Large-Small): {big_corr_med - small_corr_med:.3f}\n")
+            
+            # Final corrected flux differences
+            corr_diff_med = np.median(data_comparison['Corrected_Flux_Difference'][mask])
+            corr_diff_mean = np.mean(data_comparison['Corrected_Flux_Difference'][mask])
+            corr_diff_std = np.std(data_comparison['Corrected_Flux_Difference'][mask])
+            
+            file.write("\nFinal Corrected Flux Differences (Large - Small) [µJy]:\n")
+            file.write(f"  Median: {corr_diff_med:.2f} ± {corr_diff_std:.2f}\n")
+            file.write(f"  Mean:   {corr_diff_mean:.2f}\n")
+            
+            # Percentage of sources where large aperture gives higher flux
+            higher_flux_pct = np.sum(data_comparison['Corrected_Flux_Difference'][mask] > 0) / np.sum(mask) * 100
+            file.write(f"  Sources with higher flux in large aperture: {higher_flux_pct:.1f}%\n")
+
+        file.write(f"\nTotal sources analyzed: {len(common_ids)}\n")
+        file.write("="*80 + "\n")
