@@ -30,7 +30,7 @@ Example usage
 
 Author: Benjamin P. Collins
 Date: May 15, 2025
-Version: 1.0
+Version: 2.0
 """
 
 import os
@@ -52,7 +52,7 @@ from photutils.aperture import EllipticalAperture, EllipticalAnnulus, aperture_p
 from photutils.segmentation import detect_sources, SegmentationImage
 
 
-from .cutouts import load_cutout
+from .cutout_tools import load_cutout
 
 # Suppress common WCS-related warnings that don't affect functionality
 warnings.simplefilter("ignore", category=FITSFixedWarning)
