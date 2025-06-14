@@ -50,7 +50,7 @@ from astropy.table import Table, MaskedColumn
 from astropy.stats import SigmaClip
 from photutils.aperture import EllipticalAperture, EllipticalAnnulus, aperture_photometry
 
-from .cutouts import load_cutout
+from .cutout_tools import load_cutout
 
 # Suppress common WCS-related warnings that don't affect functionality
 warnings.simplefilter("ignore", category=FITSFixedWarning)
