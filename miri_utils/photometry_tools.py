@@ -706,10 +706,10 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, cr
         correction_factor = calculate_aperture_correction(psf_data, aperture_params)
 
         # Apply aperture correction
-        corrected_flux = flux_measurements['flux'] * correction_factor
-        corrected_flux_error = flux_measurements['flux_error'] * correction_factor
-        corrected_background_flux = flux_measurements['background_flux'] * correction_factor
-        corrected_background_error = background_std * correction_factor
+        corrected_flux = flux_measurements['flux'] #* correction_factor
+        corrected_flux_error = flux_measurements['flux_error'] #* correction_factor
+        corrected_background_flux = flux_measurements['background_flux'] #* correction_factor
+        corrected_background_error = background_std #* correction_factor
         
         # --- Convert fluxes into AB magnitudes ---
         if corrected_flux > 0:
