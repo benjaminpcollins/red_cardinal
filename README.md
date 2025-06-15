@@ -8,11 +8,11 @@ The `red_cardinal` repository stores all work related to my master's thesis and 
 red_cardinal/
 ├── miri_utils/              # Utilities related to MIRI data preparation and photometry
 │   ├── __init__.py
-│   ├── astrometry.py        
-│   ├── cutouts.py
-│   ├── photometry.py
-│   ├── rotate.py
-│   └── stamps.py
+│   ├── astrometry_utils.py        
+│   ├── cutout_tools.py
+│   ├── photometry_tools.py
+│   ├── rotation_utils.py
+│   └── stamp_maker.py
 │
 ├── astrometry.ipynb         
 ├── make_stamps.ipynb        
