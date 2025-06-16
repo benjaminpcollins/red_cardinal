@@ -1075,6 +1075,8 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
                     np.max(data_comparison['Flux_Big_Raw'][mask]))
         plt.plot([min_flux, max_flux], [min_flux, max_flux], 'r--', alpha=0.8, label='1:1')
         
+        plt.loglog()
+        
         plt.xlabel(f'{band} Small Aperture Raw Flux [µJy]')
         plt.ylabel(f'{band} Large Aperture Raw Flux [µJy]')
         plt.title(f'{band} Raw Flux Comparison')
@@ -1092,6 +1094,8 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
         max_flux_corr = max(np.max(data_comparison['Flux_Small_Corrected'][mask]), 
                             np.max(data_comparison['Flux_Big_Corrected'][mask]))
         plt.plot([min_flux_corr, max_flux_corr], [min_flux_corr, max_flux_corr], 'r--', alpha=0.8, label='1:1')
+        
+        plt.loglog()
         
         plt.xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
         plt.ylabel(f'{band} Large Aperture Corrected Flux [µJy]')
@@ -1160,6 +1164,8 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
                     np.max(data_comparison['Apr_Corr_Big'][mask]))
         plt.plot([min_corr, max_corr], [min_corr, max_corr], 'r--', alpha=0.8, label='1:1')
         
+        plt.loglog()
+        
         plt.xlabel(f'{band} Small Aperture Correction')
         plt.ylabel(f'{band} Large Aperture Correction')
         plt.title(f'{band} Aperture Corrections')
@@ -1197,7 +1203,8 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
                     alpha=0.6, s=30, c=data_comparison['Apr_Corr_Small'][mask], 
                     cmap='viridis')
         plt.colorbar(label='Small Aperture Correction')
-        plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')
+        plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')        
+        plt.xscale('log')
         plt.xlabel(f'{band} Small Aperture Raw Flux [µJy]')
         plt.ylabel('Flux Ratio (Large/Small)')
         plt.title(f'{band} Flux Ratio vs Brightness')
@@ -1211,6 +1218,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
                     cmap='plasma')
         plt.colorbar(label='Large Aperture Correction')
         plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')
+        plt.xscale('log')
         plt.xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
         plt.ylabel('Corrected Flux Ratio (Large/Small)')
         plt.title(f'{band} Corrected Flux Ratio vs Brightness')
