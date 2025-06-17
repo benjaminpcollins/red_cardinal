@@ -50,6 +50,7 @@ from astropy.table import Table, MaskedColumn
 from astropy.stats import SigmaClip, sigma_clipped_stats
 from photutils.aperture import EllipticalAperture, EllipticalAnnulus, aperture_photometry
 from photutils.segmentation import detect_sources, SegmentationImage
+from photutils.centroids import centroid_com
 
 
 from .cutout_tools import load_cutout
@@ -173,7 +174,7 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=Fal
 
 
 
-def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma, 
+def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma_val, 
                         annulus_factor, fig_path=None):
     """
     Estimate background using a global 2D plane fit, then extract statistics from 
@@ -235,7 +236,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
 
     # Step 2: Create segmentation map based on initial background estimate
     # Typically threshold is set at median + (N * std) above background
-    threshold = median_bg + (sigma * std_bg)  # sigma threshold, adjust as needed
+    threshold = median_bg + (sigma_val * std_bg)  # sigma threshold, adjust as needed
     masked_for_segm = np.copy(image_data)
     masked_for_segm[source_mask_bool] = median_bg
     segm = detect_sources(masked_for_segm, threshold, npixels=5)
@@ -276,29 +277,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     region_name = "Annulus"
     max_annulus_size = 35  # Roughly half of the 75x75 image size for large apertures
     base_factor = 2.2
-    """
-    # Adjust annuli for very large galaxies
-    if galaxy_id in ['9871', '11136', '11137', '11494', '12340', '']:
-        a_in = base_factor * a * 0.8
-        b_in = base_factor * b * 0.8
-    
-    # Adjust annuli for very elliptical galaxies
-    elif galaxy_id in ['12340', '12717', '17793', '20397']:
-        a_in = base_factor * a * 0.8
-        b_in = base_factor * b
-    
-    else:
-        a_in = base_factor * a
-        b_in = base_factor * b
-        
-    #elif galaxy_id in ['17669']:
-    #    a_in = base_factor * a * 1.2
-    #    b_in = base_factor * b * 1.2
-    
-    a_out = max(a_in * annulus_factor, max_annulus_size)
-    b_out = max(b_in * annulus_factor, max_annulus_size)
-    """
-    
+  
     ecc = a/b
     
     a_in = a + 8
@@ -327,21 +306,22 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     # Gather all the pixels within the background region that were NOT sigma-clipped
     bkg_region_valid_pixels = ~segm_mask & background_region_mask
     residual_data = image_data - background_plane
-    num_valid_pixels = np.sum(bkg_region_valid_pixels)
     
     # Calculate background statistics
     background_residuals = residual_data[bkg_region_valid_pixels]
-    background_std = np.std(background_residuals) * np.sqrt(num_valid_pixels)
+    sigma_bkg = np.std(background_residuals)
+    
+    # The following should be the 1-sigma uncertainty on the total background flux in the aperture
+    background_std = sigma_bkg * np.sqrt(source_aperture.area)
+    
+    # Previous approach -------------------------------------
+    #num_valid_pixels = np.sum(bkg_region_valid_pixels)
+    #background_std = sigma_bkg * np.sqrt(num_valid_pixels)
+    # -------------------------------------------------------
     
     # Extract background plane values for the background region and calculate the median
     bkg_plane_values = background_plane[background_region_mask]
     background_median = np.median(bkg_plane_values)
-    
-    # Print background statistics
-    #print(f"Background Statistics:")
-    #print(f"  Global 2D Plane coefficients: a={alpha:.6e}, b={beta:.6e}, c={gamma:.6f}")
-    #print(f"  {region_name} region background median: {background_median:.6f}")
-    #print(f"  {region_name} region background std dev: {background_std:.6f}")
     
     # Create a mask visualisation
     mask_vis = np.zeros_like(image_data, dtype=int)
@@ -365,7 +345,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
         'b_in': b_in,
         'a_out': a_out,
         'b_out': b_out,
-        'sigma': sigma,
+        'sigma': sigma_val,
         'region_name': region_name,
         'coeffs': (alpha, beta, gamma)
     }
@@ -494,7 +474,7 @@ def get_psf(filter_name, psf_dir='/home/bpc/University/master/Red_Cardinal/WebbP
     """
     psf_file = os.path.join(psf_dir, f'PSF_MIRI_{filter_name}.fits')    
     with fits.open(psf_file) as psf:
-        return psf[0].data
+        return psf[3].data  # Recommended extension!
 
 def get_aperture_params(galaxy_id, aperture_table):
     """
@@ -506,7 +486,7 @@ def get_aperture_params(galaxy_id, aperture_table):
         ID of the galaxy
     aperture_table : str
         Path to CSV table with aperture parameters
-        
+    
     Returns
     -------
     dict
@@ -518,8 +498,8 @@ def get_aperture_params(galaxy_id, aperture_table):
     return {
         'x_center': row['Apr_Xcenter'],
         'y_center': row['Apr_Ycenter'], 
-        'a': row['Apr_A'] / 2,  # Converting diameter to radius
-        'b': row['Apr_B'] / 2,  # Converting diameter to radius
+        'a': row['Apr_A'] / 2,  # Converting diameter to major axis length
+        'b': row['Apr_B'] / 2,  # Converting diameter to minor axis length
         'theta': (row['Apr_Theta'] * u.deg).to_value(u.rad)  # Convert to radians
     }
 
@@ -539,15 +519,27 @@ def calculate_aperture_correction(psf_data, aperture_params):
     correction_factor : float
         Aperture correction factor
     """
+    # Check for proper normalisation
+    total_flux = np.sum(psf_data)
+    assert np.isclose(total_flux, 1.0, atol=1e-3), "PSF not normalised: {total_flux:.6f}"
+
+    # Find centroid of the PSF
+    y_cen, x_cen = centroid_com(psf_data)
+    
     aperture = EllipticalAperture(
-        positions=(psf_data.shape[1] / 2, psf_data.shape[0] / 2),
+        positions=(x_cen, y_cen),
         a=aperture_params['a'],
         b=aperture_params['b'],
         theta=aperture_params['theta']
     )
-    total_flux = np.sum(psf_data)
-    phot_table = aperture_photometry(psf_data, aperture)
+    
+    # Ensure background is subtracted
+    psf_data -= np.median(psf_data[psf_data < np.percentile(psf_data, 10)])
+    
+    # Calculate flux in aperture using exact method
+    phot_table = aperture_photometry(psf_data, aperture, method='exact')
     flux_in_aperture = phot_table['aperture_sum'][0]
+    
     return total_flux / flux_in_aperture
 
 def measure_flux(image_data, error_map, background_median, background_std, aperture_params):
