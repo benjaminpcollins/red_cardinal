@@ -354,7 +354,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     if fig_path:
         visualise_background(vis_data, fig_path=fig_path)
     
-    return background_median, background_std
+    return background_median, background_std, background_plane
 
 
 
@@ -521,10 +521,12 @@ def calculate_aperture_correction(psf_data, aperture_params):
     """
     # Check for proper normalisation
     total_flux = np.sum(psf_data)
-    assert np.isclose(total_flux, 1.0, atol=1e-3), "PSF not normalised: {total_flux:.6f}"
-
+    if not np.isclose(total_flux, 1.0, atol=1e-3):
+        print(f"Warning: PSF not normalised (sum = {total_flux:.6f}). Normalising now.")
+        psf_data /= total_flux
+        
     # Find centroid of the PSF
-    y_cen, x_cen = centroid_com(psf_data)
+    x_cen, y_cen = centroid_com(psf_data)
     
     aperture = EllipticalAperture(
         positions=(x_cen, y_cen),
@@ -542,7 +544,7 @@ def calculate_aperture_correction(psf_data, aperture_params):
     
     return total_flux / flux_in_aperture
 
-def measure_flux(image_data, error_map, background_median, background_std, aperture_params):
+def measure_flux(image_data, error_map, background_plane, background_std, aperture_params):
     """
     Calculate flux and uncertainty from aperture photometry.
     
@@ -550,8 +552,8 @@ def measure_flux(image_data, error_map, background_median, background_std, apert
     ----------
     image_data : ndarray
         Image data
-    background_median : float
-        Median background level
+    background_plane : ndarray
+        2D-plane fit of the local background 
     error_map : ndarray
         Error map data
     background_std : float
@@ -564,8 +566,6 @@ def measure_flux(image_data, error_map, background_median, background_std, apert
     dict
         Dictionary with flux measurements and uncertainties
     """
-    # Subtract the median background value within the annulus from the data
-    data_bkgsub = image_data - background_median
     
     # Create aperture
     aperture = EllipticalAperture(
@@ -574,6 +574,9 @@ def measure_flux(image_data, error_map, background_median, background_std, apert
         b=aperture_params['b'],
         theta=aperture_params['theta']
     )
+    
+    # Subtract the median background value within the annulus from the data
+    data_bkgsub = image_data - background_plane
     
     # Sum flux within the aperture - baclground subtracted data
     phot_table = aperture_photometry(data_bkgsub, aperture, method='exact')
@@ -585,27 +588,28 @@ def measure_flux(image_data, error_map, background_median, background_std, apert
     
     # Flux uncertainty from ERR extension
     error_map = np.nan_to_num(error_map, nan=0.0, posinf=0.0, neginf=0.0)
-    image_errors = error_map * mask
-    sum_image_errors = np.sqrt(np.sum(image_errors**2))
     
-    # Number of pixels within the aperture
-    n_pix = aperture.area
+    # Square the errors, sum them, then take square root
+    aperture_pixels = mask > 0
+    sum_image_errors = np.sqrt(np.sum(error_map[aperture_pixels]**2))
     
     # To obtain the background flux within the aperture we multiply the median background within the annulus
     # by the number of pixels within the aperture    
-    background_flux = n_pix * background_median
+    background_flux = np.sum(background_plane[aperture_pixels])    
     
     # Total flux uncertainty
     total_flux_error = np.sqrt(sum_image_errors**2 + background_std**2)
     
     # Median error of the error map within the aperture
-    median_error = np.median(error_map[mask>0])    
+    median_error = np.median(error_map[aperture_pixels])    
     
     # Convert everything to from MJy/sr to Jy
-    miri_scale = 0.11092  # arcsec per pixel
-    miri_scale_rad = miri_scale / 206265
-    omega_pix = miri_scale_rad**2
-    conversion_factor = 1e6 * omega_pix
+    miri_pixel_scale = 0.11092  # arcsec per pixel
+    miri_scale_rad = miri_pixel_scale / 206265    # convert to rad per pixel
+    pixel_area_sr = miri_scale_rad**2   # convert to sr per pixel
+    
+    # Convert MJy/sr to Jy
+    conversion_factor = 1e6 * pixel_area_sr
     
     # Now everything is in Jy!!
     return {
@@ -613,12 +617,12 @@ def measure_flux(image_data, error_map, background_median, background_std, apert
         'flux_error': total_flux_error * conversion_factor,
         'background_flux': background_flux * conversion_factor,
         'median_error': median_error * conversion_factor,
-        'pixel_count': n_pix
+        'pixel_count': aperture.area
     }
 
 # --- Main Loop ---
 
-def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, suffix='', fig_path=None, sigma=3.0, annulus_factor=3.0):
+def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, suffix='', fig_path=None, sigma=3.0, annulus_factor=3.0, apply_aper_corr=True):
     """
     Main function to perform photometry on a list of cutout files.
     
@@ -634,6 +638,8 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
         Directory containing PSF files
     create_plots : bool, optional
         Decide whether plots should be made
+    apply_aper_corr : bool, optional
+        Decide whether aperture correction should be applied
     """
     results = []
     
@@ -675,12 +681,12 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
             os.makedirs(fig_path, exist_ok=True)
         
         # Estimate background with 2D-plane fit
-        background_median, background_std = estimate_background(
+        background_median, background_std, background_plane = estimate_background(
             galaxy_id, 
             filter_name, 
             image_data, 
             aperture_params,
-            sigma=sigma, 
+            sigma_val=sigma, 
             annulus_factor=annulus_factor, 
             fig_path=fig_path
         )                                                                   
@@ -689,22 +695,29 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
         flux_measurements = measure_flux(
             image_data, 
             image_error,
-            background_median,  
+            background_plane,  # formerly background_median
             background_std, 
             aperture_params
         )
 
         # Get PSF and calculate aperture correction
         correction_factor = calculate_aperture_correction(psf_data, aperture_params)
-
+        correction_factor_copy = correction_factor
+        
+        # Overwrite aperture correction factor if no correction should be applied
+        if apply_aper_corr == False:
+            correction_factor = 1.0
+            
         # Apply aperture correction
-        corrected_flux = flux_measurements['flux'] #* correction_factor
-        corrected_flux_error = flux_measurements['flux_error'] #* correction_factor
-        corrected_background_flux = flux_measurements['background_flux'] #* correction_factor
-        corrected_background_error = background_std #* correction_factor
+        corrected_flux = flux_measurements['flux'] * correction_factor
+        corrected_flux_error = flux_measurements['flux_error'] * correction_factor
+        corrected_background_flux = flux_measurements['background_flux'] * correction_factor
+        corrected_background_error = background_std * correction_factor
+        corrected_median_error = flux_measurements['median_error'] * correction_factor
         
         # --- Convert fluxes into AB magnitudes ---
         if corrected_flux > 0:
+            # constant is 8.90 for Jy and 23.90 for µJy
             ab_mag = -2.5 * np.log10(corrected_flux) + 8.90
         else: ab_mag = np.nan
         
@@ -713,11 +726,11 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
             'ID': int(galaxy_id),
             'Flux': corrected_flux,
             'Flux_Err': corrected_flux_error,
-            'Image_Err': flux_measurements['median_error'] * correction_factor,
+            'Image_Err': corrected_median_error,
             'Flux_BKG': corrected_background_flux,
             'Flux_BKG_Err': corrected_background_error,
             'AB_Mag': ab_mag,
-            'Apr_Corr': correction_factor,
+            'Apr_Corr': correction_factor_copy,
             'N_PIX': flux_measurements['pixel_count'],
             'Apr_A': aperture_params['a'] * 2,  # Convert back to diameter for output
             'Apr_B': aperture_params['b'] * 2,  # Convert back to diameter for output
@@ -947,7 +960,7 @@ def combine_filter_csv_to_fits(f770w_fname, f1800w_fname, fits_table_name):
 
 
 
-def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summary_doc_path):
+def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summary_doc_path, scaling=None):
     """
     Compare and contrast two photometric tables WITHOUT APERTURE CORRECTION APPLIED
     and create a comprehensive summary plot of all important statistics and write
@@ -962,6 +975,8 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
             Output path of the summary plot
         summary_doc_path (str): 
             Output path of the summary text file
+        scaling (str) optional:
+            'log' for logarithmic, default is linear
     """
     # Enhanced Aperture Photometry Comparison
     import numpy as np
@@ -1066,9 +1081,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
         max_flux = max(np.max(data_comparison['Flux_Small_Raw'][mask]), 
                     np.max(data_comparison['Flux_Big_Raw'][mask]))
         plt.plot([min_flux, max_flux], [min_flux, max_flux], 'r--', alpha=0.8, label='1:1')
-        
-        plt.loglog()
-        
+        if scaling: plt.loglog()
         plt.xlabel(f'{band} Small Aperture Raw Flux [µJy]')
         plt.ylabel(f'{band} Large Aperture Raw Flux [µJy]')
         plt.title(f'{band} Raw Flux Comparison')
@@ -1086,9 +1099,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
         max_flux_corr = max(np.max(data_comparison['Flux_Small_Corrected'][mask]), 
                             np.max(data_comparison['Flux_Big_Corrected'][mask]))
         plt.plot([min_flux_corr, max_flux_corr], [min_flux_corr, max_flux_corr], 'r--', alpha=0.8, label='1:1')
-        
-        plt.loglog()
-        
+        if scaling: plt.loglog()
         plt.xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
         plt.ylabel(f'{band} Large Aperture Corrected Flux [µJy]')
         plt.title(f'{band} Corrected Flux Comparison')
@@ -1155,9 +1166,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
         max_corr = max(np.max(data_comparison['Apr_Corr_Small'][mask]), 
                     np.max(data_comparison['Apr_Corr_Big'][mask]))
         plt.plot([min_corr, max_corr], [min_corr, max_corr], 'r--', alpha=0.8, label='1:1')
-        
-        plt.loglog()
-        
+        if scaling: plt.loglog()
         plt.xlabel(f'{band} Small Aperture Correction')
         plt.ylabel(f'{band} Large Aperture Correction')
         plt.title(f'{band} Aperture Corrections')
@@ -1196,7 +1205,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
                     cmap='viridis')
         plt.colorbar(label='Small Aperture Correction')
         plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')        
-        plt.xscale('log')
+        if scaling: plt.xscale('log')
         plt.xlabel(f'{band} Small Aperture Raw Flux [µJy]')
         plt.ylabel('Flux Ratio (Large/Small)')
         plt.title(f'{band} Flux Ratio vs Brightness')
@@ -1210,7 +1219,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
                     cmap='plasma')
         plt.colorbar(label='Large Aperture Correction')
         plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')
-        plt.xscale('log')
+        if scaling: plt.xscale('log')
         plt.xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
         plt.ylabel('Corrected Flux Ratio (Large/Small)')
         plt.title(f'{band} Corrected Flux Ratio vs Brightness')
