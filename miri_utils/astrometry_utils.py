@@ -279,7 +279,7 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, use_filters=F
     ax.set_ylabel('ΔDec (arcsec)')
     ax.set_title(f'{survey_cap} Astrometric Offset\n{filter} MIRI vs F444W NIRCam')
 
-    scatter_path = os.path.join(plot_dir, f'{survey_cap}_offset_{filter}_scatter.png')
+    scatter_path = os.path.join(plot_dir, f'{survey}_offset_{filter}_scatter.png')
     fig.savefig(scatter_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
@@ -299,7 +299,7 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, use_filters=F
     ax.set_xlim(ra_min - arrow_max, ra_max + arrow_max)
     ax.set_ylim(dec_min - arrow_max, dec_max + arrow_max)
 
-    quiver_path = os.path.join(plot_dir, f'{survey_cap}_offset_{filter}_arrows.png')
+    quiver_path = os.path.join(plot_dir, f'{survey}_offset_{filter}_arrows.png')
     fig.savefig(quiver_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
@@ -314,7 +314,7 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, use_filters=F
     axs[1].set_title("ΔDec (arcsec)")
     axs[1].set_xlabel("Offset (arcsec)")
 
-    hist_path = os.path.join(plot_dir, col1.replace('dra', f'offset_{filter}_histogram.png'))
+    hist_path = os.path.join(plot_dir, f'{survey}_offset_{filter}_hist.png')
     fig.savefig(hist_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     
@@ -363,3 +363,45 @@ def get_mean_stats(filename):
     ddec_mean = stats["ddec_mean"]
     return dra_mean, ddec_mean
 
+
+# Function to plot offsets in polar coordinates
+def plot_astrometric_offsets(df1, df2, label1, label2, output_dir, band):
+    # Convert RA/Dec offsets to polar coordinates
+    def to_polar(dra, ddec):
+        r = np.sqrt(dra**2 + ddec**2)
+        theta = np.arctan2(ddec, dra)  # angle from x-axis (RA), in radians
+        return r, theta
+
+    r1, theta1 = to_polar(df1['dra'], df1['ddec'])
+    r2, theta2 = to_polar(df2['dra'], df2['ddec'])
+
+    # Plot
+    fig = plt.figure(figsize=(8, 8))
+    ax = plt.subplot(111, polar=True)
+    ax.scatter(theta1, r1, s=10, alpha=0.6, label=label1)
+    ax.scatter(theta2, r2, s=10, alpha=0.6, label=label2)
+
+    # Plot mean offset vectors
+    for r, t, label, col in zip(
+        [r1, r2],
+        [theta1, theta2],
+        [label1, label2],
+        ['tab:blue', 'tab:orange']
+    ):
+        r_mean = np.mean(r)
+        t_mean = np.arctan2(np.mean(np.sin(t)), np.mean(np.cos(t)))
+        ax.scatter(t_mean, r_mean, color=col, label=f'{label} mean')
+
+    ax.set_title(f'Astrometric Offsets (F444W → {band})', fontsize=14)
+    ax.set_rmax(0.5)
+    ax.set_rticks([0.1, 0.2, 0.3, 0.4, 0.5])  # arcsec
+    ax.set_rlabel_position(135)
+    ax.grid(True)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+
+    # Save
+    figname = output_dir + f'polar_offset_{band}.png'
+    print(f'Figure saved to {figname}')
+    plt.tight_layout()
+    plt.savefig(figname)
+    plt.show()
