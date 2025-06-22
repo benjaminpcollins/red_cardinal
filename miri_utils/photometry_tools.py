@@ -59,18 +59,22 @@ from .cutout_tools import load_cutout
 warnings.simplefilter("ignore", category=FITSFixedWarning)
 
 
-def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=False):
+def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='masks', save_plot=False):
     
     # --- Load the FITS table ---
-    #table_path =  '/home/bpc/University/master/Red_Cardinal/Flux_Aperture_PSFMatched_AperCorr_old.fits'
-    #aperture_table = Table.read(table_path)
-    table_path =  '/home/bpc/University/master/Red_Cardinal/aperture_table.csv'
-    df = pd.read_csv(table_path)
+    table_path =  '/home/bpc/University/master/Red_Cardinal/catalogues/Flux_Aperture_PSFMatched_AperCorr_old.fits'
+    aperture_table = Table.read(table_path)
+    #table_path =  '/home/bpc/University/master/Red_Cardinal/catalogues/aperture_table.csv'
+    #df = pd.read_csv(table_path)
     
     # --- Select the galaxy by ID ---
-    #row = aperture_table[aperture_table['ID'] == galaxy_id][0]
-    galaxy_id = int(galaxy_id)
-    row = df[df['ID'] == galaxy_id].iloc[0]
+    matches = aperture_table[aperture_table['ID'] == galaxy_id]
+    if len(matches) == 0:
+        print(f"Galaxy ID {galaxy_id} not found in the table.")
+        return None
+    else:
+        row = matches[0]
+    #row = df[df['ID'] == galaxy_id].iloc[0]
 
     # --- Read in rotation angle of MIRI FITS file ---
     angle_file = '/home/bpc/University/master/Red_Cardinal/rotation_angles.json'
@@ -98,15 +102,30 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=Fal
     
     # arcsec/pixel
     scale_factor = nircam_scale / miri_scale
+    pixel_conversion = scale_factor
     
-    # --- Specify parameters for the ellips ---
-    width = row['Apr_A'] * scale_factor * 2
-    height = row['Apr_B'] * scale_factor * 2
+    ####################################################
+    ### Additional rescaling of the NIRCam apertures ###
+    ####################################################
+    
+    if int(galaxy_id) == 12332:
+        scale_factor *= 1.0 # no additional scaling to avoid contaminating source
+    elif int(galaxy_id) == 16419:
+        scale_factor *= 1.4
+    elif int(galaxy_id) == 7136:
+        scale_factor *= 1.6
+    elif int(galaxy_id) in [10314, 10592, 21452]:
+        scale_factor *= 1.8
+    else:
+        scale_factor *= 2.0
+    
+    # --- Specify parameters for the ellipse ---
+    width = row['Apr_A'] * scale_factor
+    height = row['Apr_B'] * scale_factor
     theta = -row['Apr_Theta']
     theta_new = ((theta - angle) % 180) * u.deg
     
     if save_plot:
-        
         # --- Clean and prepare the MIRI data for plotting ---
         miri_clean = np.copy(miri_data)
         finite_vals = miri_clean[np.isfinite(miri_clean)].flatten()
@@ -126,9 +145,9 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=Fal
         # Original ellipse (without rotation correction)
         ellipse_original = Ellipse(
             xy=(miri_x, miri_y),
-            width=width,
-            height=height,
-            angle=theta,  # Just the original θ!
+            width=row['Apr_A'] * pixel_conversion,     # Here we just
+            height=row['Apr_B'] * pixel_conversion,    # leave the 
+            angle=theta,                               # original values
             edgecolor='red',
             facecolor='none',
             lw=2,
@@ -155,18 +174,23 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, save_plot=Fal
         ax.legend(loc='upper right')
         
         # Save figure
-        #png_path = os.path.join(output_folder, f'masks/{galaxy_id}_{survey}{obs}_aperture_overlay.png')
-        #plt.savefig(png_path, dpi=150, bbox_inches='tight')
-        #plt.close(fig)
+        mask_dir = os.path.join(output_folder, mask_folder)
+        os.makedirs(mask_dir, exist_ok=True)
+        png_path = os.path.join(mask_dir, f'{galaxy_id}_{survey}{obs}_aperture_overlay.png')
+        plt.savefig(png_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
         
-    # Collect modified aperture data
-    aperture_info = {          
-    'Apr_A': width,            # Rescaled aperture
-    'Apr_B': height,
-    'Apr_Xcenter': miri_x,
-    'Apr_Ycenter': miri_y,
-    'Apr_Theta': theta_new.to_value(u.deg),
-    'ID': galaxy_id
+    # Collect modified aperture data including full context
+    aperture_info = {
+        'ID': galaxy_id,
+        'Filter': filter,
+        'Survey': survey,
+        'Obs': obs,
+        'Apr_A': width,
+        'Apr_B': height,
+        'Apr_Xcenter': miri_x,
+        'Apr_Ycenter': miri_y,
+        'Apr_Theta': theta_new.to_value(u.deg)
     }
     
     return aperture_info
@@ -275,7 +299,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     
     # Define the background region
     region_name = "Annulus"
-    max_annulus_size = 35  # Roughly half of the 75x75 image size for large apertures
+    max_annulus_size = 32  # Roughly half of the 75x75 image size for large apertures
     base_factor = 2.2
   
     ecc = a/b
@@ -449,10 +473,7 @@ def visualise_background(vis_data, fig_path=None):
     
     if fig_path:
         os.makedirs(fig_path, exist_ok=True)
-        if filter == 'F1800W':
-            filepath = os.path.join(fig_path, f'{galaxy_id}_{filter}.png')
-        else: 
-            filepath = os.path.join(fig_path, f'{galaxy_id}.png')
+        filepath = os.path.join(fig_path, f'{galaxy_id}_{filter}.png')
         plt.savefig(filepath, dpi=150)
         plt.close(fig)
 
@@ -476,7 +497,7 @@ def get_psf(filter_name, psf_dir='/home/bpc/University/master/Red_Cardinal/WebbP
     with fits.open(psf_file) as psf:
         return psf[3].data  # Recommended extension!
 
-def get_aperture_params(galaxy_id, aperture_table):
+def get_aperture_params(galaxy_id, filter, aperture_table):
     """
     Retrieve aperture parameters from the CSV table.
     
@@ -493,11 +514,13 @@ def get_aperture_params(galaxy_id, aperture_table):
         Dictionary with aperture parameters
     """
     df = pd.read_csv(aperture_table)
-    row = df[df['ID'] == int(galaxy_id)].iloc[0]
+    
+    # Look for the unique combination of ID and filter
+    row = df[(df['ID'] == int(galaxy_id)) & (df['Filter'] == filter)].iloc[0]
     
     return {
         'x_center': row['Apr_Xcenter'],
-        'y_center': row['Apr_Ycenter'], 
+        'y_center': row['Apr_Ycenter'],
         'a': row['Apr_A'] / 2,  # Converting diameter to major axis length
         'b': row['Apr_B'] / 2,  # Converting diameter to minor axis length
         'theta': (row['Apr_Theta'] * u.deg).to_value(u.rad)  # Convert to radians
@@ -649,6 +672,11 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
         galaxy_id = fits_name.split('_')[0]
         filter_name = fits_name.split('_')[1]
         
+        if int(galaxy_id) in [18094, 19307]:
+            continue
+        elif int(galaxy_id) in [16424] and filter_name == 'F770W':
+            continue
+        
         print(f'Processing galaxy {galaxy_id} with filter {filter_name}...')
         
         # Load image data
@@ -657,7 +685,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
             image_error = hdul['ERR'].data if 'ERR' in hdul else hdul[2].data
             
         # Get aperture parameters
-        aperture_params = get_aperture_params(galaxy_id, aperture_table)
+        aperture_params = get_aperture_params(galaxy_id, filter_name, aperture_table)
         
         # Set sigma-clipping threshold based on galaxy ID and filter
         sigma = 2.8  # Default value
@@ -739,10 +767,12 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
             'Apr_Theta': (aperture_params['theta'] * u.rad).to_value(u.deg)  # Convert to degrees for output
         })
     
+    suffix = '_' + suffix
     # Save to output table (assuming it's a pandas DataFrame)
     os.makedirs(os.path.join(output_folder, 'results'), exist_ok=True)
     output_path = os.path.join(output_folder, f'results/phot_table_{filter_name}{suffix}.csv')
     output_df = pd.DataFrame(results)
+    
     output_df.to_csv(output_path, index=False)
     
 def combine_figures(fig_path='/home/bpc/University/master/Red_Cardinal/photometry/mosaic_plots/'):
@@ -805,157 +835,127 @@ def combine_figures(fig_path='/home/bpc/University/master/Red_Cardinal/photometr
  
  
  
-def create_fits_table_from_csv(f770w_csv_path, f1800w_csv_path=None, output_file='Flux_Aperture_PSFMatched_AperCorr_MIRI.fits'):
+def create_fits_table_from_csv(csv_paths, output_file):
     """
-    Create a FITS table by combining photometry data from F770W and F1800W CSV files.
-
+    Create a FITS table by combining photometry data from multiple MIRI filter CSV files.
+    
     Parameters:
     -----------
-    f770w_csv_path : str
-        Path to the CSV file containing F770W photometry results.
-    f1800w_csv_path : str, optional
-        Path to the CSV file containing F1800W photometry results.
-        If None or file doesn't exist, only F770W data will be used.
+    csv_fnames : list of str
+        List of paths to CSV files corresponding to the filters (in the same order as 'filters').
     output_file : str
         Output FITS file name.
+    skip_gid : list of int
+        List of galaxy IDs to skip for photometric analysis e.g. due to incomplete coverage
     """
-    # Load F770W CSV file (required)
-    try:
-        df_f770w = pd.read_csv(f770w_csv_path)
-        print(f"Loaded F770W data with {len(df_f770w)} rows")
-    except FileNotFoundError:
-        raise FileNotFoundError(f"F770W CSV file not found: {f770w_csv_path}")
+    
+    # Check which filters are used based on the csv files
+    filters = []
+    for csv_file in csv_paths:
+        filter = os.path.basename(csv_file).split('_')[2]
+        filters.append(filter)
+        
+    # Check that at least one CSV file exists
+    valid_csvs = [(path, f) for path, f in zip(csv_paths, filters) if path and os.path.exists(path)]
+    if not valid_csvs:
+        raise ValueError("At least one valid CSV file is required.")
 
-    # Load F1800W CSV file (optional)
-    df_f1800w = None
-    if f1800w_csv_path and os.path.exists(f1800w_csv_path):
-        df_f1800w = pd.read_csv(f1800w_csv_path)
-        print(f"Loaded F1800W data with {len(df_f1800w)} rows")
-    else:
-        print("No F1800W data provided or file not found")
+    # Load all valid CSVs into a dict
+    dfs = {}
+    all_ids = set()
 
-    # Get all galaxy IDs from F770W - these are our primary sources
-    galaxy_ids = df_f770w['ID'].unique()
-    print(f"Found {len(galaxy_ids)} unique galaxy IDs")
+    for path, filt in valid_csvs:
+        df = pd.read_csv(path)
+        print(f"Loaded {filt} data with {len(df)} rows")
+        dfs[filt] = df
+        # Convert ID column of the df to a list and create the union of this
+        # list with all_ids to filter out the unique IDs - genius!
+        all_ids.update(df['ID'].tolist())   
 
-    # Initialize the table
+    # Sort and convert to list
+    galaxy_ids = sorted(all_ids)
+    print(f"Found {len(galaxy_ids)} unique galaxy IDs across all filters")
+    
+    # Initialize table
     table = Table()
 
-    # Define which columns should be masked
+    # Define columns
     masked_columns = ['Flux_Err', 'Flux_BKG', 'AB_Mag', 'Flux_BKG_Err']
-
-    # These columns will have 2 values per row (one for each filter)
-    array_columns = ['Flux', 'Flux_Err', 'Image_Err', 'Flux_BKG', 'Flux_BKG_Err', 
-                        'AB_Mag', 'Apr_Corr']
-
-    # These columns will be scalar (one value per galaxy)
+    array_columns =  ['Flux', 'Flux_Err', 'Image_Err', 'Flux_BKG', 'Flux_BKG_Err', 'AB_Mag', 'Apr_Corr']
     scalar_columns = ['N_PIX', 'Apr_A', 'Apr_B', 'Apr_Xcenter', 'Apr_Ycenter', 'Apr_Theta']
 
-    # Prepare data for each column
+    # Prepare data structures
     column_data = {col: [] for col in array_columns + scalar_columns}
 
-    # Process each galaxy ID
     for gid in galaxy_ids:
-        # Get F770W data for this galaxy
-        f770w_row = df_f770w[df_f770w['ID'] == gid].iloc[0]
-        
-        # Get F1800W data for this galaxy if available
-        f1800w_row = None
-        if df_f1800w is not None and gid in df_f1800w['ID'].values:
-            f1800w_row = df_f1800w[df_f1800w['ID'] == gid].iloc[0]
-        
-        # Process array columns (with values for both filters)
-        for col in array_columns:
-            # Always have F770W data
-            filter_values = [f770w_row[col]]
-            
-            # Add F1800W data if available, otherwise add NaN
-            if f1800w_row is not None:
-                filter_values.append(f1800w_row[col])
-            else:
-                filter_values.append(np.nan)
-            
-            column_data[col].append(filter_values)
-        
-        # Process scalar columns (single value per galaxy)
-        for col in scalar_columns:
-            column_data[col].append(f770w_row[col])
 
-    # Add ID column (one ID per galaxy)
+        row_data = {col: [] for col in array_columns}
+        
+        # Determine base row from the first available filter table
+        base_row = None
+        for df in dfs.values():
+            if gid in df['ID'].values:
+                base_row = df[df['ID'] == gid].iloc[0]
+                break
+
+        if base_row is None:
+            raise ValueError(f"Galaxy ID {gid} not found in any input CSV.")
+
+        for filt in filters:
+            df = dfs.get(filt, None)
+            if df is not None and gid in df['ID'].values:
+                row = df[df['ID'] == gid].iloc[0]  
+            else:
+                row = None
+
+            for col in array_columns:
+                if row is not None:
+                    row_data[col].append(row[col])
+                else:
+                    row_data[col].append(np.nan)
+
+        # Append filter data
+        for col in array_columns:
+            column_data[col].append(row_data[col])
+
+        # Append scalar data from base row
+        for col in scalar_columns:
+            column_data[col].append(base_row[col])  # 
+
+    # Add ID column
     id_bytes = [str(gid).encode('ascii') for gid in galaxy_ids]
     table.add_column(id_bytes, name='ID')
 
-    # Add array columns
+    # Add array columns with masking
     for col in array_columns:
         if col in masked_columns:
-            # Create masked column
             masked_col = MaskedColumn(column_data[col], name=col, dtype=np.float64)
-            
-            # Mask NaN values
             for i, row in enumerate(column_data[col]):
                 for j, val in enumerate(row):
                     if np.isnan(val):
                         masked_col.mask[i, j] = True
-            
-            # Additional masking for AB_Mag based on flux values
             if col == 'AB_Mag':
                 for i, flux_row in enumerate(column_data['Flux']):
                     for j, flux_val in enumerate(flux_row):
-                        # Mask AB_Mag where flux is invalid
                         if flux_val <= 0 or np.isnan(flux_val):
                             masked_col.mask[i, j] = True
-            
             table.add_column(masked_col)
         else:
-            # Regular column
             table.add_column(column_data[col], name=col)
 
-    # Add scalar columns
     for col in scalar_columns:
         table.add_column(column_data[col], name=col)
 
-    # Print table info
     print("\nFITS Table Summary:")
     print(table.info())
 
-    # Write to FITS file
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    table.write(output_file, format='fits', overwrite=True)
-    print(f"\nSaved FITS table to {output_file}")
+    phot_tables_dir = '/home/bpc/University/master/Red_Cardinal/photometry/phot_tables/'
+    os.makedirs(phot_tables_dir, exist_ok=True)
+    fits_output = os.path.join(phot_tables_dir, output_file)
+    table.write(fits_output, format='fits', overwrite=True)
+    print(f"\nSaved FITS table to {fits_output}")
 
     return table
-
-
-def combine_filter_csv_to_fits(f770w_fname, f1800w_fname, fits_table_name):
-    """
-    Combine filter-specific CSV files into a single FITS table.
-
-    Parameters:
-    -----------
-    f770w_fname : str
-        Filename of the F770W CSV table containing the aperture photometry results
-    f1800w_fname : str
-        Filename of the F1800W CSV table containing the aperture photometry results
-    fits_table_name : str
-        Filename of the output FITS table
-    suffix : str, optional
-        Suffix to the final output table to keep track of versions locally
-    """
-    # Define results folder as a static variable
-    results_folder = '/home/bpc/University/master/Red_Cardinal/photometry/results/'
-    
-    # CSV files for each filter
-    f770w_csv = os.path.join(results_folder, f770w_fname)
-    f1800w_csv = os.path.join(results_folder, f1800w_fname)
-
-    # Output FITS file
-    fits_output = os.path.join(results_folder, fits_table_name)
-
-    # Create the combined FITS table
-    table = create_fits_table_from_csv(f770w_csv, f1800w_csv, fits_output)
-
-    return table
-
 
 
 
@@ -1287,3 +1287,5 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
 
         file.write(f"\nTotal sources analyzed: {len(common_ids)}\n")
         file.write("="*80 + "\n")
+        
+        
