@@ -51,6 +51,7 @@ from astropy.stats import SigmaClip, sigma_clipped_stats
 from photutils.aperture import EllipticalAperture, EllipticalAnnulus, aperture_photometry
 from photutils.segmentation import detect_sources, SegmentationImage
 from photutils.centroids import centroid_com
+from collections import defaultdict
 
 
 from .cutout_tools import load_cutout
@@ -110,11 +111,9 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='
     
     if int(galaxy_id) == 12332:
         scale_factor *= 1.0 # no additional scaling to avoid contaminating source
-    elif int(galaxy_id) == 16419:
-        scale_factor *= 1.4
-    elif int(galaxy_id) == 7136:
+    elif int(galaxy_id) in [7136, 7904, 7922, 11136, 16419, 21452]:
         scale_factor *= 1.6
-    elif int(galaxy_id) in [10314, 10592, 21452]:
+    elif int(galaxy_id) in [7934, 10314, 10592, 18332]:
         scale_factor *= 1.8
     else:
         scale_factor *= 2.0
@@ -251,11 +250,12 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     # Create mask for the source
     source_mask = source_aperture.to_mask(method='center').to_image(image_data.shape)
     source_mask_bool = source_mask.astype(bool)
+    total_mask = source_mask_bool | np.isnan(image_data)
     
     # Step 1: Get initial background estimate using sigma clipping
     # This doesn't require knowing sources beforehand
     mean_bg, median_bg, std_bg = sigma_clipped_stats(
-        image_data, sigma=2.5, maxiters=5, mask=source_mask_bool | np.isnan(image_data)
+        image_data, sigma=2.5, maxiters=5, mask=total_mask
     )
 
     # Step 2: Create segmentation map based on initial background estimate
@@ -305,12 +305,12 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     ecc = a/b
     
     a_in = a + 8
-    b_in = b + 8/ecc
+    b_in = b + 10/ecc
     
     scale_factor = max_annulus_size / a_in
     
     a_out = a_in * scale_factor
-    b_out = b_in * scale_factor + 2*ecc   # account for eccentricity
+    b_out = b_in * scale_factor + 3*ecc   # account for eccentricity
     
     
     # Create the annulus
@@ -325,27 +325,22 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     
     # Create mask for the annulus region
     annulus_mask = annulus.to_mask(method='center').to_image(image_data.shape)
-    background_region_mask = annulus_mask.astype(bool) & ~np.isnan(image_data)
+    annulus_mask_bool = annulus_mask.astype(bool)
+    background_region_mask = annulus_mask_bool & ~np.isnan(image_data) & ~segm_mask
 
     # Gather all the pixels within the background region that were NOT sigma-clipped
     bkg_region_valid_pixels = ~segm_mask & background_region_mask
-    residual_data = image_data - background_plane
+    data_bkgsub = image_data - background_plane
     
     # Calculate background statistics
-    background_residuals = residual_data[bkg_region_valid_pixels]
+    background_residuals = data_bkgsub[bkg_region_valid_pixels]
     sigma_bkg = np.std(background_residuals)
     
     # The following should be the 1-sigma uncertainty on the total background flux in the aperture
     background_std = sigma_bkg * np.sqrt(source_aperture.area)
     
-    # Previous approach -------------------------------------
-    #num_valid_pixels = np.sum(bkg_region_valid_pixels)
-    #background_std = sigma_bkg * np.sqrt(num_valid_pixels)
-    # -------------------------------------------------------
-    
     # Extract background plane values for the background region and calculate the median
-    bkg_plane_values = background_plane[background_region_mask]
-    background_median = np.median(bkg_plane_values)
+    background_median = np.median(background_residuals)
     
     # Create a mask visualisation
     mask_vis = np.zeros_like(image_data, dtype=int)
@@ -359,7 +354,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
         'filter': filter_name,
         'original_data': image_data,
         'background_plane': background_plane,
-        'background_subtracted': residual_data,
+        'background_subtracted': data_bkgsub,
         'mask_vis': mask_vis,
         'segmentation_mask': segm_mask,
         'background_region_mask': background_region_mask,
@@ -567,7 +562,7 @@ def calculate_aperture_correction(psf_data, aperture_params):
     
     return total_flux / flux_in_aperture
 
-def measure_flux(image_data, error_map, background_plane, background_std, aperture_params):
+def measure_flux(image_data, error_map, background_median, background_std, background_plane, aperture_params):
     """
     Calculate flux and uncertainty from aperture photometry.
     
@@ -618,7 +613,7 @@ def measure_flux(image_data, error_map, background_plane, background_std, apertu
     
     # To obtain the background flux within the aperture we multiply the median background within the annulus
     # by the number of pixels within the aperture    
-    background_flux = np.sum(background_plane[aperture_pixels])    
+    background_flux = background_median * aperture.area
     
     # Total flux uncertainty
     total_flux_error = np.sqrt(sum_image_errors**2 + background_std**2)
@@ -666,16 +661,84 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
     """
     results = []
     
+    companion_flag = False
+    artefact_flag = False
+    
     for fits_path in cutout_files:
         # Extract ID and filter from filename
         fits_name = os.path.basename(fits_path)
         galaxy_id = fits_name.split('_')[0]
         filter_name = fits_name.split('_')[1]
         
-        if int(galaxy_id) in [18094, 19307]:
+        #########################################################
+        #####               Filtering Section               #####
+        #########################################################
+        
+        exclude_all =    [18094, 19307]
+        exclude_f770w =  [16424]
+        exclude_f1000w = []
+        exclude_f1800w = [12202, 12332, 16419]
+        exclude_f2100w = [7102, 16874]
+        
+        art_f770w = [7185, 8013, 8469, 8500, 8843, 9517, 11136, 
+                     11137, 11494, 11716, 16516, 17793, 19098,
+                     21451]
+        art_f1000w = []
+        art_f1800w = [7102, 11716, 12202, 17793, 19098, 21451]
+        art_f2100w = [11723, 12175, 12213, 16874, 17984]
+        
+        has_companion = [7136, 7904, 7922, 7934, 8469, 10314, 
+                           16424, 17517, 18332, 21452]
+        
+        # Galaxies to exclude from analysis
+        # -------------------------------------------------------
+        if int(galaxy_id) in exclude_all:
             continue
-        elif int(galaxy_id) in [16424] and filter_name == 'F770W':
-            continue
+        
+        # Galaxies that have companions that could cause 
+        # contamination 
+        # -------------------------------------------------------
+        if galaxy_id in has_companion:
+            companion_flag = True
+        
+        # Galaxies that should be excluded in only one filter
+        # or show weird detector artefacts
+        # -------------------------------------------------------
+        if filter_name == 'F770W':
+            # Exclude from analysis
+            if int(galaxy_id) in exclude_f770w:
+                continue
+            # Artefact
+            elif int(galaxy_id) in art_f770w:
+                artefact_flag = True
+                
+        elif filter_name == 'F1000W':
+            # Exclude from analysis
+            if int(galaxy_id) in exclude_f1000w:
+                continue
+            # Artefact
+            if int(galaxy_id) in art_f1000w:
+                artefact_flag = True
+                
+        elif filter_name == 'F1800W':
+            # Exclude from analysis
+            if int(galaxy_id) in exclude_f1800w:
+                continue
+            # Artefact
+            if int(galaxy_id) in art_f1800w:
+                artefact_flag = True
+                
+        elif filter_name == 'F2100W':
+            # Exclude from analysis
+            if int(galaxy_id) in exclude_f2100w:
+                continue
+            # Artefact
+            if int(galaxy_id) in art_f2100w:
+                artefact_flag = True
+        
+        #########################################################
+        #####               Start Photometry                #####
+        #########################################################
         
         print(f'Processing galaxy {galaxy_id} with filter {filter_name}...')
         
@@ -723,8 +786,9 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
         flux_measurements = measure_flux(
             image_data, 
             image_error,
-            background_plane,  # formerly background_median
+            background_median,
             background_std, 
+            background_plane,
             aperture_params
         )
 
@@ -764,7 +828,9 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
             'Apr_B': aperture_params['b'] * 2,  # Convert back to diameter for output
             'Apr_Xcenter': aperture_params['x_center'],
             'Apr_Ycenter': aperture_params['y_center'],
-            'Apr_Theta': (aperture_params['theta'] * u.rad).to_value(u.deg)  # Convert to degrees for output
+            'Apr_Theta': (aperture_params['theta'] * u.rad).to_value(u.deg),  # Convert to degrees for output
+            'Flag_Com': companion_flag,
+            'Flag_Art': artefact_flag
         })
     
     suffix = '_' + suffix
@@ -880,51 +946,89 @@ def create_fits_table_from_csv(csv_paths, output_file):
     table = Table()
 
     # Define columns
+    array_columns =  [
+        'Flux',             # flux in µJy
+        'Flux_Err',         # total error
+        'Image_Err',        # median per-pixel uncertainty of the 
+                            # 'ERR'-extension within the aperture
+        'Flux_BKG',         # background flux within the aperture
+        'Flux_BKG_Err',     # uncertainty on background
+        'AB_Mag',           # AB magnitude
+        'Apr_Corr',         # aperture correction
+    
+        # Aperture position/orientation - varies with WCS per filter
+        'Apr_Xcenter',      # aperture X-centre in MIRI pixels
+        'Apr_Ycenter',      # aperture Y-centre
+        'Apr_Theta',        # rotation angle in degrees
+        'Flag_Art'          # flag for weird detector artefacts
+    ]
+    
+    scalar_columns = [ 
+        'Apr_A',            # semi-major axis in MIRI pixels 
+        'Apr_B',            # semi-minor axis
+        'N_PIX',            # pixel count within the aperture
+        'Flag_Com'         # flag for companion in the frame
+    ]
+    
+    # Specify columns that might contain masked values and should be ignored by astropy
     masked_columns = ['Flux_Err', 'Flux_BKG', 'AB_Mag', 'Flux_BKG_Err']
-    array_columns =  ['Flux', 'Flux_Err', 'Image_Err', 'Flux_BKG', 'Flux_BKG_Err', 'AB_Mag', 'Apr_Corr']
-    scalar_columns = ['N_PIX', 'Apr_A', 'Apr_B', 'Apr_Xcenter', 'Apr_Ycenter', 'Apr_Theta']
 
     # Prepare data structures
     column_data = {col: [] for col in array_columns + scalar_columns}
+    filters_data = []  # Separate handling for filters
 
     for gid in galaxy_ids:
-
         row_data = {col: [] for col in array_columns}
         
-        # Determine base row from the first available filter table
+        # Determine base row from the first available filter table for scalar values
         base_row = None
         for df in dfs.values():
             if gid in df['ID'].values:
                 base_row = df[df['ID'] == gid].iloc[0]
                 break
-
+        
         if base_row is None:
             raise ValueError(f"Galaxy ID {gid} not found in any input CSV.")
-
+        
+        filters_present = []  # Track available filters for this galaxy
+        
+        # Process each filter to build array data
         for filt in filters:
             df = dfs.get(filt, None)
             if df is not None and gid in df['ID'].values:
                 row = df[df['ID'] == gid].iloc[0]  
+                filters_present.append(filt)    # Record that the filter is available
             else:
                 row = None
 
+            # Build array data for this filter
             for col in array_columns:
                 if row is not None:
                     row_data[col].append(row[col])
                 else:
-                    row_data[col].append(np.nan)
+                    # Handle different default values for different column types
+                    if col == 'Flag_Art':
+                        default_val = False  
+                    else:
+                        default_val = np.nan
+                    if row is not None:
+                        row_data[col].append(row[col])
+                    else:
+                        row_data[col].append(default_val)
 
-        # Append filter data
+        # Store filters as a comma-separated string instead of a list
+        filters_data.append(','.join(filters_present))
+        
+        # Append array data to main storage
         for col in array_columns:
             column_data[col].append(row_data[col])
 
-        # Append scalar data from base row
+        # Append scalar data from base row (only process columns that are actually scalar)
         for col in scalar_columns:
-            column_data[col].append(base_row[col])  # 
+            column_data[col].append(base_row[col])
 
-    # Add ID column
-    id_bytes = [str(gid).encode('ascii') for gid in galaxy_ids]
-    table.add_column(id_bytes, name='ID')
+    # Add ID column as strings (astropy will handle FITS conversion)
+    table.add_column(galaxy_ids, name='ID')
 
     # Add array columns with masking
     for col in array_columns:
@@ -943,10 +1047,22 @@ def create_fits_table_from_csv(csv_paths, output_file):
         else:
             table.add_column(column_data[col], name=col)
 
+    # Add filters column as strings (astropy will handle FITS conversion)
+    table.add_column(filters_data, name='Filters')
+
+    # Add scalar columns
     for col in scalar_columns:
         table.add_column(column_data[col], name=col)
 
     print("\nFITS Table Summary:")
+    print("="*50)
+    print("DATA STRUCTURE OVERVIEW:")
+    print("- Array columns: Values stored per filter (length = number of filters)")
+    print("- Scalar columns: Single value per galaxy ID")
+    print("- Flag_Art: Boolean array, True/False per filter for each galaxy")
+    print("- Flag_Com: Boolean scalar, True/False per galaxy (same across all filters)")
+    print("- Filters: Comma-separated string of available filters per galaxy")
+    print("="*50)
     print(table.info())
 
     phot_tables_dir = '/home/bpc/University/master/Red_Cardinal/photometry/phot_tables/'
@@ -958,6 +1074,159 @@ def create_fits_table_from_csv(csv_paths, output_file):
     return table
 
 
+
+
+def galaxy_statistics(table_path, fig_path=None, stats_path=None):
+    """
+    Analyse how many galaxies are observed in each filter, and which galaxy IDs appear per filter.
+
+    Parameters:
+    -----------
+    table_path : str
+        Path to the FITS table
+
+    Returns:
+    --------
+    filter_id_map : dict
+        Dictionary mapping each filter to a set of galaxy IDs.
+    """
+    table = Table.read(table_path, format='fits')
+
+    if 'Filters' not in table.colnames or 'ID' not in table.colnames:
+        raise ValueError("FITS table must contain 'Filters' and 'ID' columns.")
+
+    filter_id_map = defaultdict(set)
+
+    for row in table:
+        gid = row['ID']
+        filters_str = row['Filters']
+        filters = [f.strip() for f in filters_str.split(',') if f.strip()]
+        for filt in filters:
+            filter_id_map[filt].add(gid)
+
+    # Print summary
+    print("\nGalaxy Filter Mapping:")
+    print("=" * 30)
+    for filt, ids in filter_id_map.items():
+        print(f"{filt:10s}: {len(ids)} galaxies")
+
+    if fig_path:
+        plot_galaxy_filter_matrix(table_path, fig_path)
+        print(f'Saved output plot to {fig_path}')
+    if stats_path:
+        write_galaxy_stats(table, stats_path)
+        print(f'Wrote galaxy statistics to {stats_path}')
+    
+    return filter_id_map
+
+def write_galaxy_stats(table, output_path):
+    with open(output_path, 'w') as f:
+        f.write("Galaxy filter mapping summary:\n")
+        f.write("="*40 + "\n")
+
+        # 1. Which galaxy IDs are mapped in which filters
+        f.write("Per-galaxy Filter Coverage:\n")
+        f.write("-" * 35 + "\n")
+        for row in table:
+            gid = row['ID']
+            filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
+            f.write(f"Galaxy {gid}: {', '.join(filters)}\n")
+
+        # 2. Group by number of filters
+        f.write("\nGalaxies by Number of Filters Covered:\n")
+        f.write("-" * 45 + "\n")
+        filters_per_count = defaultdict(list)
+
+        for row in table:
+            gid = row['ID']
+            filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
+            filters_per_count[len(filters)].append((gid, filters))
+
+        for n in sorted(filters_per_count.keys()):
+            f.write(f"\nMapped in {n} filter(s): {len(filters_per_count[n])} galaxies\n")
+            for gid, filt_list in filters_per_count[n]:
+                f.write(f"  {gid}: {', '.join(filt_list)}\n")
+
+
+def plot_galaxy_filter_matrix(table_path, fig_path):
+    """
+    Visualise which galaxies are observed in which filters using a binary matrix plot.
+
+    Parameters:
+    -----------
+    table_path : str
+        Path to the FITS file.
+    fig_path : str
+        Path to the output file
+    """
+    table = Table.read(table_path, format='fits')
+    
+    # Default order from blue to red for MIRI filters
+    filter_order = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+
+    # Custom pastel RGB colours from blue → red
+    pastel_colours = {
+        'F770W': '#a6cee3',   # light pastel blue
+        'F1000W': '#b2df8a',  # soft green
+        'F1800W': '#fdbf6f',  # light orange
+        'F2100W': '#fb9a99'   # pastel red
+    }
+
+    galaxy_ids = [str(gid) for gid in table['ID']]
+    num_galaxies = len(galaxy_ids)
+    chunk_size = (num_galaxies + 3) // 4  # split into 4 roughly equal parts
+    chunks = [galaxy_ids[i:i + chunk_size] for i in range(0, num_galaxies, chunk_size)]
+
+    # Calculate size for square cells
+    cell_size = 0.5  # in inches per side
+    num_cols = len(filter_order)
+    num_rows = chunk_size
+    fig_width = cell_size * num_cols * 4  # 4 panels
+    fig_height = cell_size * num_rows * 0.65    # emiprical factor for approximate squares
+    
+    fig, axes = plt.subplots(1, 4, figsize=(fig_width, fig_height), squeeze=False)
+    axes = axes[0]  # Unpack single row
+        
+    if len(chunks) == 1:
+        axes = [axes]  # ensure iterable
+
+    plot_number = 0
+    for ax, g_ids in zip(axes, chunks):
+        matrix = np.zeros((len(g_ids), len(filter_order)), dtype=int)
+        g_index_map = {gid: i for i, gid in enumerate(g_ids)}
+
+        # Fill matrix
+        for row in table:
+            gid = str(row['ID'])
+            if gid not in g_index_map:
+                continue
+            g_idx = g_index_map[gid]
+            filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
+            for filt in filters:
+                if filt in filter_order:
+                    f_idx = filter_order.index(filt)
+                    matrix[g_idx, f_idx] = 1
+        
+        # Draw coloured rectangles
+        for i in range(matrix.shape[0]):
+            for j in range(matrix.shape[1]):
+                if matrix[i, j] == 1:
+                    ax.add_patch(
+                        plt.Rectangle((j, i), 1, 1, color=pastel_colours[filter_order[j]])
+                    )
+
+        ax.set_xlim(0, len(filter_order))
+        ax.set_ylim(len(g_ids), 0)
+        ax.set_xticks(np.arange(len(filter_order)) + 0.5)
+        ax.set_xticklabels(filter_order, rotation=45, ha='right')
+        ax.set_yticks(np.arange(len(g_ids)) + 0.5)
+        ax.set_yticklabels(g_ids, fontsize=8)
+        if plot_number == 0: ax.set_ylabel("Galaxy ID", fontsize=12)
+        plot_number += 1
+        
+    plt.tight_layout()
+    plt.savefig(fig_path, dpi=150)
+    plt.show()
 
 
 def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summary_doc_path, scaling=None):
