@@ -527,8 +527,8 @@ def calculate_aperture_correction(psf_data, aperture_params):
     
     Parameters
     ----------
-    psf_data : ndarray
-        PSF data
+    psf_data
+        Loaded PSF data
     aperture_params : dict
         Aperture parameters
         
@@ -537,6 +537,7 @@ def calculate_aperture_correction(psf_data, aperture_params):
     correction_factor : float
         Aperture correction factor
     """
+    
     # Check for proper normalisation
     total_flux = np.sum(psf_data)
     if not np.isclose(total_flux, 1.0, atol=1e-3):
@@ -640,7 +641,8 @@ def measure_flux(image_data, error_map, background_median, background_std, backg
 
 # --- Main Loop ---
 
-def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, suffix='', fig_path=None, sigma=3.0, annulus_factor=3.0, apply_aper_corr=True):
+def perform_photometry(cutout_files, aperture_table, output_folder, suffix='', 
+                       fig_path=None, sigma=3.0, annulus_factor=3.0, apply_aper_corr=True):
     """
     Main function to perform photometry on a list of cutout files.
     
@@ -652,88 +654,85 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
         Path to CSV table with aperture parameters
     output_folder : str
         Path to output folder
-    psf_dir : str
-        Directory containing PSF files
-    create_plots : bool, optional
-        Decide whether plots should be made
+    psf_data : FITS extension
+        Loaded FITS data extension (use number 3)
+    suffix : str, optional
+        Choose a custom filename extension to track version history
+    fig_path : str, optional
+        Path to the plot directory
+    sigma : float, optional
+        Manually set threshold for the sigma clipping. Default value is 3.0
+    annulus_factor : float, optional
+        Manually set inner radius for the annulus (in terms of aperture size)
     apply_aper_corr : bool, optional
         Decide whether aperture correction should be applied
     """
     results = []
     
-    companion_flag = False
-    artefact_flag = False
+    psf_f770w  = get_psf('F770W')
+    psf_f1000w = get_psf('F1000W')
+    psf_f1800w = get_psf('F1800W')
+    psf_f2100w = get_psf('F2100W')
+    
+    psf_dict = {
+        'F770W':  psf_f770w,
+        'F1000W': psf_f1000w,
+        'F1800W': psf_f1800w,
+        'F2100W': psf_f2100w
+    }
+    
+    #########################################################
+    #####         Initialise Filtering Arrays           #####
+    #########################################################    
+    exclude_all = [18094, 19307]
+    exclude_filters = {
+        'F770W': [16424],
+        'F1000W': [],
+        'F1800W': [12202, 12332, 16419],
+        'F2100W': [7102, 16874]
+    }
+    art_filters = {
+        'F770W': [7185, 8013, 8469, 8500, 8843, 9517, 11136,
+                    11137, 11494, 11716, 16516, 17793, 19098, 21451],
+        'F1000W': [],
+        'F1800W': [7102, 11716, 12202, 17793, 19098, 21451],
+        'F2100W': [11723, 12175, 12213, 16874, 17984]
+    }
+    has_companion = [7136, 7904, 7922, 7934, 8469, 10314,
+                        16424, 17517, 18332, 21452]
+    
     
     for fits_path in cutout_files:
         # Extract ID and filter from filename
         fits_name = os.path.basename(fits_path)
         galaxy_id = fits_name.split('_')[0]
         filter_name = fits_name.split('_')[1]
+        psf_data = psf_dict[filter_name]
         
         #########################################################
         #####               Filtering Section               #####
         #########################################################
         
-        exclude_all =    [18094, 19307]
-        exclude_f770w =  [16424]
-        exclude_f1000w = []
-        exclude_f1800w = [12202, 12332, 16419]
-        exclude_f2100w = [7102, 16874]
-        
-        art_f770w = [7185, 8013, 8469, 8500, 8843, 9517, 11136, 
-                     11137, 11494, 11716, 16516, 17793, 19098,
-                     21451]
-        art_f1000w = []
-        art_f1800w = [7102, 11716, 12202, 17793, 19098, 21451]
-        art_f2100w = [11723, 12175, 12213, 16874, 17984]
-        
-        has_companion = [7136, 7904, 7922, 7934, 8469, 10314, 
-                           16424, 17517, 18332, 21452]
+        companion_flag = False
+        artefact_flag = False
         
         # Galaxies to exclude from analysis
-        # -------------------------------------------------------
         if int(galaxy_id) in exclude_all:
             continue
         
-        # Galaxies that have companions that could cause 
-        # contamination 
-        # -------------------------------------------------------
-        if galaxy_id in has_companion:
+        # Galaxies that have companions that could cause contamination
+        if int(galaxy_id) in has_companion:
             companion_flag = True
         
-        # Galaxies that should be excluded in only one filter
-        # or show weird detector artefacts
-        # -------------------------------------------------------
-        if filter_name == 'F770W':
+        # Galaxies that should be excluded in only one filter or show weird detector artefacts
+        if filter_name in exclude_filters:
             # Exclude from analysis
-            if int(galaxy_id) in exclude_f770w:
+            if int(galaxy_id) in exclude_filters[filter_name]:
                 continue
+        
+        if filter_name in art_filters:
             # Artefact
-            elif int(galaxy_id) in art_f770w:
-                artefact_flag = True
-                
-        elif filter_name == 'F1000W':
-            # Exclude from analysis
-            if int(galaxy_id) in exclude_f1000w:
-                continue
-            # Artefact
-            if int(galaxy_id) in art_f1000w:
-                artefact_flag = True
-                
-        elif filter_name == 'F1800W':
-            # Exclude from analysis
-            if int(galaxy_id) in exclude_f1800w:
-                continue
-            # Artefact
-            if int(galaxy_id) in art_f1800w:
-                artefact_flag = True
-                
-        elif filter_name == 'F2100W':
-            # Exclude from analysis
-            if int(galaxy_id) in exclude_f2100w:
-                continue
-            # Artefact
-            if int(galaxy_id) in art_f2100w:
+            if int(galaxy_id) in art_filters[filter_name]:
                 artefact_flag = True
         
         #########################################################
@@ -764,14 +763,13 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
                                                    '16424', '17000', '17669', '11137']:
             sigma = 2.0
         
-        # Setup paths for visualisation
-        #vis_path = os.path.join(output_folder, 'mosaic_fits')
-        #os.makedirs(vis_path, exist_ok=True)
-        
         if fig_path is not None:
             os.makedirs(fig_path, exist_ok=True)
         
-        # Estimate background with 2D-plane fit
+        #########################################################
+        #####              Estimate Background              #####
+        #########################################################
+        
         background_median, background_std, background_plane = estimate_background(
             galaxy_id, 
             filter_name, 
@@ -782,7 +780,10 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
             fig_path=fig_path
         )                                                                   
         
-        # Measure flux
+        #########################################################
+        #####                 Measure Flux                  #####
+        #########################################################
+        
         flux_measurements = measure_flux(
             image_data, 
             image_error,
@@ -792,6 +793,10 @@ def perform_photometry(cutout_files, aperture_table, output_folder, psf_data, su
             aperture_params
         )
 
+        #########################################################
+        #####           Apply Aperture Correction           #####
+        #########################################################        
+        
         # Get PSF and calculate aperture correction
         correction_factor = calculate_aperture_correction(psf_data, aperture_params)
         correction_factor_copy = correction_factor
@@ -1026,7 +1031,7 @@ def create_fits_table_from_csv(csv_paths, output_file):
         # Append scalar data from base row (only process columns that are actually scalar)
         for col in scalar_columns:
             column_data[col].append(base_row[col])
-
+    
     # Add ID column as strings (astropy will handle FITS conversion)
     table.add_column(galaxy_ids, name='ID')
 
@@ -1207,20 +1212,59 @@ def plot_galaxy_filter_matrix(table_path, fig_path):
                     f_idx = filter_order.index(filt)
                     matrix[g_idx, f_idx] = 1
         
-        # Draw coloured rectangles
+        table_id_to_row = {str(row['ID']): idx for idx, row in enumerate(table)}
+
+        # Draw coloured rectangles with artefact indication
         for i in range(matrix.shape[0]):
             for j in range(matrix.shape[1]):
                 if matrix[i, j] == 1:
-                    ax.add_patch(
-                        plt.Rectangle((j, i), 1, 1, color=pastel_colours[filter_order[j]])
-                    )
+                    base_colour = pastel_colours[filter_order[j]]
+                    # Check artefact flag for this galaxy and filter
+                    flag_art = False
+                    gid = g_ids[i]  # galaxy ID for this row in the matrix
+                    table_row_idx = table_id_to_row[str(gid)]
+                    row = table[table_row_idx]
 
+                    # Flag_Art is expected as list or array of bools per filter
+                    flag_art_array = row['Flag_Art']
+                    if flag_art_array is not None and len(flag_art_array) == len(filter_order):
+                        flag_art = flag_art_array[j]
+
+                    # If artefact, adjust colour (e.g., darken by 30%)
+                    if flag_art:
+                        # Simple darken: convert hex to RGB, darken, back to hex
+                        import matplotlib.colors as mcolors
+                        rgb = np.array(mcolors.to_rgb(base_colour))
+                        darker_rgb = np.clip(rgb * 0.7, 0, 1)  # darken by 30%
+                        colour = darker_rgb
+                    else:
+                        colour = base_colour
+
+                    ax.add_patch(
+                        plt.Rectangle((j, i), 1, 1, color=colour)
+                    )
+        
+        # Modify y-axis labels to add '*' for galaxies with a companion
+        y_labels = []
+        for i, gid in enumerate(g_ids):
+            table_row_idx = table_id_to_row[str(gid)]
+            row = table[table_row_idx]
+            label = str(gid)
+            if row['Flag_Com'] == True:
+                label += '*'  # Append asterisk if companion flag is True
+            y_labels.append(label)
+
+        # Set y-axis tick labels with modified labels
+        ax.set_yticks(np.arange(len(g_ids)) + 0.5)  # Centre labels in each row
+        ax.set_yticklabels(y_labels, fontsize=8)
+
+        
         ax.set_xlim(0, len(filter_order))
         ax.set_ylim(len(g_ids), 0)
         ax.set_xticks(np.arange(len(filter_order)) + 0.5)
         ax.set_xticklabels(filter_order, rotation=45, ha='right')
         ax.set_yticks(np.arange(len(g_ids)) + 0.5)
-        ax.set_yticklabels(g_ids, fontsize=8)
+        ax.set_yticklabels(y_labels, fontsize=8)
         if plot_number == 0: ax.set_ylabel("Galaxy ID", fontsize=12)
         plot_number += 1
         
