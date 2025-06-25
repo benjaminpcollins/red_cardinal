@@ -35,6 +35,7 @@ Version: 2.0
 
 import os
 import glob
+import h5py
 import numpy as np
 import pandas as pd
 import warnings
@@ -299,19 +300,20 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     
     # Define the background region
     region_name = "Annulus"
-    max_annulus_size = 32  # Roughly half of the 75x75 image size for large apertures
-    base_factor = 2.2
-  
-    ecc = a/b
     
     a_in = a + 8
-    b_in = b + 10/ecc
+    b_in = b + 8
     
-    scale_factor = max_annulus_size / a_in
+    # Check how much space there is to the boundary
+    delta_x = min(x_center, 72-x_center)
+    delta_y = min(y_center, 72-y_center)
     
-    a_out = a_in * scale_factor
-    b_out = b_in * scale_factor + 3*ecc   # account for eccentricity
+    # Maximum theoretically possible radius for a circle
+    r_max = max(delta_x, delta_y) - 2   # for boundary buffer
     
+    # Specify a_out and b_out
+    a_out = r_max
+    b_out = 0.9*r_max
     
     # Create the annulus
     annulus = EllipticalAnnulus(
@@ -373,8 +375,190 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     if fig_path:
         visualise_background(vis_data, fig_path=fig_path)
     
+    vis_dir = '/home/bpc/University/master/Red_Cardinal/photometry/vis_data'
+    os.makedirs(vis_dir, exist_ok=True)
+    
+    vis_path = os.path.join(vis_dir, f'{galaxy_id}_{filter_name}.h5')
+    save_vis(vis_data, vis_path)
+    
     return background_median, background_std, background_plane
 
+def save_vis(vis_data, filename):
+    """
+    Save visualisation data to HDF5 file.
+    
+    Parameters:
+    -----------
+    vis_data : dict
+        Dictionary containing visualization data
+    filename : str
+        Output filename (should end with .h5 or .hdf5)
+    """
+    with h5py.File(filename, 'w') as f:
+        # Save arrays with compression
+        for key in ['original_data', 'background_plane', 'background_subtracted', 
+                   'mask_vis', 'segmentation_mask', 'background_region_mask', 
+                   'source_mask']:
+            if key in vis_data and vis_data[key] is not None:
+                f.create_dataset(key, data=vis_data[key], compression='gzip', compression_opts=6)
+        
+        # Save scalars
+        for key in ['galaxy_id', 'a_in', 'b_in', 'a_out', 'b_out', 'sigma']:
+            if key in vis_data and vis_data[key] is not None:
+                f.attrs[key] = vis_data[key]
+        
+        # Save strings
+        for key in ['filter', 'region_name']:
+            if key in vis_data and vis_data[key] is not None:
+                f.attrs[key] = vis_data[key].encode('utf-8') if isinstance(vis_data[key], str) else vis_data[key]
+        
+        # Save coefficients tuple
+        if 'coeffs' in vis_data and vis_data['coeffs'] is not None:
+            f.create_dataset('coeffs', data=np.array(vis_data['coeffs']))
+        
+        # Save aperture_params dict as JSON string
+        if 'aperture_params' in vis_data and vis_data['aperture_params'] is not None:
+            f.attrs['aperture_params'] = json.dumps(vis_data['aperture_params'])
+        
+        # Add metadata
+        f.attrs['created_date'] = np.string_(str(np.datetime64('now')))
+        f.attrs['data_type'] = np.string_('galaxy_visualization_data')
+
+def load_vis(filename):
+    """
+    Load visualisation data from HDF5 file.
+    
+    Parameters:
+    -----------
+    filename : str
+        Input filename
+        
+    Returns:
+    --------
+    dict : Loaded visualisation data
+    """
+    vis_data = {}
+    
+    with h5py.File(filename, 'r') as f:
+        # Load arrays
+        for key in ['original_data', 'background_plane', 'background_subtracted', 
+                   'mask_vis', 'segmentation_mask', 'background_region_mask', 
+                   'source_mask']:
+            if key in f:
+                vis_data[key] = f[key][:]
+        
+        # Load coefficients
+        if 'coeffs' in f:
+            vis_data['coeffs'] = tuple(f['coeffs'][:])
+        
+        # Load scalars from attributes
+        for key in ['galaxy_id', 'a_in', 'b_in', 'a_out', 'b_out', 'sigma']:
+            if key in f.attrs:
+                vis_data[key] = f.attrs[key]
+        
+        # Load strings from attributes
+        for key in ['filter', 'region_name']:
+            if key in f.attrs:
+                val = f.attrs[key]
+                if isinstance(val, bytes):
+                    vis_data[key] = val.decode('utf-8')
+                else:
+                    vis_data[key] = val
+        
+        # Load aperture_params dict
+        if 'aperture_params' in f.attrs:
+            vis_data['aperture_params'] = json.loads(f.attrs['aperture_params'])
+    
+    return vis_data
+
+def create_mosaic(input_dir, output_dir):
+    
+    all_files = glob.glob(os.path.join(input_dir, '*.h5'))
+    
+    # Load all valid h5 files into a dict
+    all_ids = []
+
+    # Sort out unique IDs
+    for path in all_files:
+        fname = os.path.basename(path)
+        galaxy_id = fname.split('_')[0]
+        all_ids.append(galaxy_id)
+    all_ids = np.unique(all_ids)
+    
+    # Load vis data for each ID
+    for gid in all_ids:
+        
+        print(f"Processing galaxy {gid}...")
+        
+        visualisation_data = []
+        vis_files = glob.glob(os.path.join(input_dir, f'{gid}*.h5'))
+        for file in vis_files:
+            visualisation_data.append(load_vis(file))
+        
+        # Set fixed filter order from blue to red
+        fixed_filter_order = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+        
+        # Create a lookup dictionary of filter name → data
+        vis_dict = {v['filter']: v for v in visualisation_data}
+
+        # Reorder vis_array according to fixed_filter_order, skipping missing filters
+        vis_data_sorted = [vis_dict[filt] for filt in fixed_filter_order if filt in vis_dict]
+
+        # Create visualisations
+        num_filters = len(visualisation_data)
+        fig, axes = plt.subplots(3, num_filters, figsize=(4*num_filters, 12))
+        
+        # Ensure axes is 2D even if len(vis_array) == 1
+        if num_filters == 1:
+            axes = np.expand_dims(axes, axis=1)
+        
+        for ii, vis_data in enumerate(vis_data_sorted):
+            
+            # Extract data from the dictionary
+            image_data = vis_data['original_data']
+            background_plane = vis_data['background_plane']
+            mask_vis = vis_data['mask_vis']
+            aperture_params = vis_data['aperture_params']
+            galaxy_id = vis_data['galaxy_id']
+            filter = vis_data['filter']
+            
+            # Create aperture objects for plotting
+            x_center = aperture_params['x_center']
+            y_center = aperture_params['y_center']
+            a = aperture_params['a']
+            b = aperture_params['b']
+            theta = aperture_params['theta']
+            
+            source_aperture = EllipticalAperture(
+                positions=(x_center, y_center),
+                a=a,
+                b=b,
+                theta=theta
+            )
+
+            # Original data with aperture
+            vmin = np.nanpercentile(image_data, 5)
+            vmax = np.nanpercentile(image_data, 95)
+            
+            im0 = axes[0, ii].imshow(image_data, origin='lower', cmap='magma', vmin=vmin, vmax=vmax)
+            axes[0, ii].set_title(f'{filter}', fontsize=10)
+            
+            # Plot the source aperture
+            source_aperture.plot(ax=axes[0, ii], color='blue', lw=4)
+            
+            im1 = axes[1, ii].imshow(background_plane, origin='lower', cmap='viridis')
+            
+            # Mask visualisation
+            cmap = plt.cm.get_cmap('viridis', 4)
+            im2 = axes[2, ii].imshow(mask_vis, origin='lower', cmap=cmap, vmin=-0.5, vmax=3.5)
+        
+        plt.tight_layout()
+        
+        os.makedirs(output_dir, exist_ok=True)
+        filepath = os.path.join(output_dir, f'{galaxy_id}.png')
+        plt.savefig(filepath, dpi=150)
+        plt.close(fig)
+        
 
 
 def visualise_background(vis_data, fig_path=None):
@@ -427,15 +611,6 @@ def visualise_background(vis_data, fig_path=None):
     # Plot the source aperture
     source_aperture.plot(ax=axes[0, 0], color='red', lw=1.5)
     
-    # Plot the background region
-    annulus = EllipticalAnnulus(
-        positions=(x_center, y_center),
-        a_in  = vis_data['a_in'],
-        b_in  = vis_data['b_in'],
-        a_out = vis_data['a_out'],
-        b_out = vis_data['b_out'],
-        theta = theta
-    )
     # Overlay the segmentation mask as white outlines
     axes[0, 0].contour(segm_mask, levels=[0.5], colors='blue', linewidths=1.5)
         
@@ -447,7 +622,7 @@ def visualise_background(vis_data, fig_path=None):
     
     im1 = axes[0, 1].imshow(background_subtracted, origin='lower', cmap='magma', vmin=vmin2, vmax=vmax2)
     plt.colorbar(im1, ax=axes[0, 1], label='Background-subtracted Flux [MJy/(sr pixel)]')
-    source_aperture.plot(ax=axes[0, 1], color='red', lw=1.5)
+    source_aperture.plot(ax=axes[0, 1], color='blue', lw=4)
     axes[0, 1].set_title("Background-subtracted Data with Aperture")
     
     # Global 2D background plane
@@ -844,66 +1019,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, suffix='',
     output_path = os.path.join(output_folder, f'results/phot_table_{filter_name}{suffix}.csv')
     output_df = pd.DataFrame(results)
     
-    output_df.to_csv(output_path, index=False)
-    
-def combine_figures(fig_path='/home/bpc/University/master/Red_Cardinal/photometry/mosaic_plots/'):
-    """Function that scans a directory for plots in different filters and
-       combines them if available.   
-    """
-    print(f"Scanning {fig_path} for galaxy images to combine...")
-
-    # Get all F1800W images
-    f1800w_pngs = glob.glob(os.path.join(fig_path, '*_F1800W.png'))
-
-    # Track how many images we've combined
-    combined_count = 0
-
-    for f1800w_png in f1800w_pngs:
-        # Extract galaxy ID from filename
-        galaxy_id = os.path.basename(f1800w_png).replace('_F1800W.png', '')
-        f770w_png = os.path.join(fig_path, f'{galaxy_id}.png')
-        
-        # Check if the standard file exists
-        if os.path.exists(f770w_png):
-            try:
-                # Open both images
-                img_f770w = Image.open(f770w_png)
-                img_f1800w = Image.open(f1800w_png)
-                
-                # Get dimensions
-                width1, height1 = img_f770w.size
-                width2, height2 = img_f1800w.size
-                
-                # Create a new image with enough width for both images
-                combined_width = width1 + width2
-                combined_height = max(height1, height2)
-                combined_img = Image.new('RGB', (combined_width, combined_height), (255, 255, 255))
-                
-                # Paste both images
-                combined_img.paste(img_f770w, (0, 0))
-                combined_img.paste(img_f1800w, (width1, 0))
-                
-                # Save combined image
-                save_png = os.path.join(fig_path, f'{galaxy_id}.png')
-                combined_img.save(save_png)
-                
-                # Delete the F1800W file
-                os.remove(f1800w_png)
-                
-                combined_count += 1
-                print(f"Combined images for galaxy {galaxy_id}")
-                
-            except Exception as e:
-                print(f"Error combining images for galaxy {galaxy_id}: {e}")
-
-    print(f"Combined {combined_count} galaxy image pairs.")
-
-    # Check if any F1800W images remain (no matching F770W image)
-    remaining_f1800w = glob.glob(os.path.join(fig_path, '*_F1800W.png'))
-    if remaining_f1800w:
-        print(f"Note: {len(remaining_f1800w)} F1800W images have no matching standard image.")
- 
- 
+    output_df.to_csv(output_path, index=False) 
  
  
 def create_fits_table_from_csv(csv_paths, output_file):
@@ -1265,7 +1381,7 @@ def plot_galaxy_filter_matrix(table_path, fig_path):
         ax.set_xticklabels(filter_order, rotation=45, ha='right')
         ax.set_yticks(np.arange(len(g_ids)) + 0.5)
         ax.set_yticklabels(y_labels, fontsize=8)
-        if plot_number == 0: ax.set_ylabel("Galaxy ID", fontsize=12)
+        #if plot_number == 0: ax.set_ylabel("Galaxy ID", fontsize=12)
         plot_number += 1
         
     plt.tight_layout()
