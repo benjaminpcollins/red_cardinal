@@ -98,7 +98,6 @@ def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", na
     cutout size in pixels. Adjust this value if using data from different instruments.
     """
 
-
     # Load target catalogue with object IDs and coordinates
     with fits.open(cat) as catalog_hdul:
         cat_data = catalog_hdul[1].data
@@ -121,6 +120,7 @@ def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", na
     # Initialise counter for successful cutouts
     counts = 0
     total = len(ra)
+    suffx = '_' + suffix
     
     # Calculate cutout size in pixels based on MIRI instrument scale
     miri_scale = 0.11092  # arcsec per pixel
@@ -187,15 +187,15 @@ def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", na
                     
                     # Add to output file
                     cutout_hdul.append(cutout_hdu)
-
+                
                 # Save the cutout if it meets quality criteria (not too many NaNs and has data extensions)
                 if max_nan_ratio < nan_thresh and len(cutout_hdul) > 1:
                     # Generate PNG preview from extension 1 data
                     preview_data = cutout_hdul[1].data
                     plt.figure(figsize=(6, 6))
                     plt.imshow(preview_data, origin="lower", cmap="gray")
-                    plt.colorbar()
-                    plt.title(f'{survey}: {ids[i]} at {filter}')
+                    
+                    plt.title(filter)
                     png_filename = os.path.join(output_dir, f"{ids[i]}_{filter}_cutout_{survey}{obs}{suffix}.png")
                     plt.savefig(png_filename)
                     plt.close()
