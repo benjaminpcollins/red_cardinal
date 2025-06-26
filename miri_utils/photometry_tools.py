@@ -198,8 +198,7 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='
 
 
 
-def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma_val, 
-                        annulus_factor, fig_path=None):
+def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma_val):
     """
     Estimate background using a global 2D plane fit, then extract statistics from 
     an elliptical annulus.
@@ -216,21 +215,15 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
         Dictionary containing aperture parameters (x_center, y_center, a, b, theta)
     sigma : float
         Sigma clipping threshold
-    annulus_factor : float
-        Factor by which to scale the inner ellipse to create the outer ellipse
-    visualise : bool, optional
-        If True, display visualisation plots
         
     Returns
     -------
-    - background_plane : ndarray
-        2D background model
-    - background_median : float
-        median background value within the annulus
     - background_std : float
         standard deviation of background model within the annulus (excluding clipped data)
-    - background_region_mask : ndarray
-        boolean mask showing the region used for background stats
+    - background_median : float
+        median background value within the annulus
+    - background_plane : ndarray
+        2D background model
 
     """
     
@@ -350,7 +343,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     mask_vis[background_region_mask] = 2  # Pixels in the annulus/rectangle
     mask_vis[source_mask_bool] = 3  # Source pixels
     
-    # Store visualization data
+    # Store visualisation data
     vis_data = {
         'galaxy_id': galaxy_id,
         'filter': filter_name,
@@ -371,10 +364,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
         'coeffs': (alpha, beta, gamma)
     }
     
-    # If requested, visualize the results
-    if fig_path:
-        visualise_background(vis_data, fig_path=fig_path)
-    
+    # Save visualisation data to .h5 file
     vis_dir = '/home/bpc/University/master/Red_Cardinal/photometry/vis_data'
     os.makedirs(vis_dir, exist_ok=True)
     
@@ -471,93 +461,98 @@ def load_vis(filename):
     
     return vis_data
 
-def create_mosaic(input_dir, output_dir):
-    
+def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
     all_files = glob.glob(os.path.join(input_dir, '*.h5'))
+    all_ids = np.unique([os.path.basename(f).split('_')[0] for f in all_files])
+
+    def plot_aperture_overlay(ax, data, aperture, cmap='magma', label='', percentile=(5, 95)):
+        vmin, vmax = np.nanpercentile(data, percentile)
+        im = ax.imshow(data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax)
+        aperture.plot(ax=ax, color='blue', lw=4)
+        ax.set_title(label)
+        return im
     
-    # Load all valid h5 files into a dict
-    all_ids = []
+    if plane_sub_dir:
+        os.makedirs(plane_sub_dir, exist_ok=True)
 
-    # Sort out unique IDs
-    for path in all_files:
-        fname = os.path.basename(path)
-        galaxy_id = fname.split('_')[0]
-        all_ids.append(galaxy_id)
-    all_ids = np.unique(all_ids)
-    
-    # Load vis data for each ID
-    for gid in all_ids:
-        
-        print(f"Processing galaxy {gid}...")
-        
-        visualisation_data = []
-        vis_files = glob.glob(os.path.join(input_dir, f'{gid}*.h5'))
-        for file in vis_files:
-            visualisation_data.append(load_vis(file))
-        
-        # Set fixed filter order from blue to red
-        fixed_filter_order = ['F770W', 'F1000W', 'F1800W', 'F2100W']
-        
-        # Create a lookup dictionary of filter name → data
-        vis_dict = {v['filter']: v for v in visualisation_data}
+        for file in all_files:
+            vis = load_vis(file)
+            image_data = vis['original_data']
+            background_plane = vis['background_plane']
+            background_subtracted = vis['background_subtracted']
+            aperture_params = vis['aperture_params']
+            filter = vis['filter']
+            galaxy_id = vis['galaxy_id']
 
-        # Reorder vis_array according to fixed_filter_order, skipping missing filters
-        vis_data_sorted = [vis_dict[filt] for filt in fixed_filter_order if filt in vis_dict]
-
-        # Create visualisations
-        num_filters = len(visualisation_data)
-        fig, axes = plt.subplots(3, num_filters, figsize=(4*num_filters, 12))
-        
-        # Ensure axes is 2D even if len(vis_array) == 1
-        if num_filters == 1:
-            axes = np.expand_dims(axes, axis=1)
-        
-        for ii, vis_data in enumerate(vis_data_sorted):
-            
-            # Extract data from the dictionary
-            image_data = vis_data['original_data']
-            background_plane = vis_data['background_plane']
-            mask_vis = vis_data['mask_vis']
-            aperture_params = vis_data['aperture_params']
-            galaxy_id = vis_data['galaxy_id']
-            filter = vis_data['filter']
-            
-            # Create aperture objects for plotting
-            x_center = aperture_params['x_center']
-            y_center = aperture_params['y_center']
-            a = aperture_params['a']
-            b = aperture_params['b']
-            theta = aperture_params['theta']
-            
-            source_aperture = EllipticalAperture(
-                positions=(x_center, y_center),
-                a=a,
-                b=b,
-                theta=theta
+            aperture = EllipticalAperture(
+                positions=(aperture_params['x_center'], aperture_params['y_center']),
+                a=aperture_params['a'],
+                b=aperture_params['b'],
+                theta=aperture_params['theta']
             )
 
-            # Original data with aperture
-            vmin = np.nanpercentile(image_data, 5)
-            vmax = np.nanpercentile(image_data, 95)
+            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+            im0 = plot_aperture_overlay(axes[0], image_data, aperture, label="Original Data with Aperture")
+            im1 = axes[1].imshow(background_plane, origin='lower', cmap='viridis')
+            axes[1].set_title("Global 2D Background Plane")
+            im2 = plot_aperture_overlay(axes[2], background_subtracted, aperture, label="Background-subtracted Data")
+
+            for ax, im, label in zip(axes, [im0, im1, im2], [
+                'Flux [MJy/(sr pixel)]',
+                'Background Flux [MJy/(sr pixel)]',
+                'Background-subtracted Flux [MJy/(sr pixel)]'
+            ]):
+                plt.colorbar(im, ax=ax, label=label)
+
+            fig.suptitle(f'{filter}', fontsize=18)
+            plt.tight_layout()
+            plt.savefig(os.path.join(plane_sub_dir, f'{galaxy_id}_{filter}_planefit.png'), dpi=150)
+            plt.close(fig)
+
+    if mosaic_dir:
+        os.makedirs(mosaic_dir, exist_ok=True)
+
+        for gid in all_ids:
+            print(f"Processing galaxy {gid}...")
+            vis_files = glob.glob(os.path.join(input_dir, f'{gid}*.h5'))
+            vis_list = [load_vis(f) for f in vis_files]
+
+            filter_order = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+            vis_dict = {v['filter']: v for v in vis_list}
+            vis_sorted = [vis_dict[f] for f in filter_order if f in vis_dict]
+
+            num = len(vis_sorted)
+            fig, axes = plt.subplots(3, num, figsize=(4*num, 12))
+
+            if num == 1:
+                axes = np.expand_dims(axes, axis=1)
+
+            for ii, vis in enumerate(vis_sorted):
+                ap_params = vis['aperture_params']
+                aperture = EllipticalAperture(
+                    positions=(ap_params['x_center'], ap_params['y_center']),
+                    a=ap_params['a'],
+                    b=ap_params['b'],
+                    theta=ap_params['theta']
+                )
+
+                # Top: original + aperture
+                plot_aperture_overlay(axes[0, ii], vis['original_data'], aperture, label=vis['filter'])
+
+                # Middle: background plane
+                axes[1, ii].imshow(vis['background_plane'], origin='lower', cmap='viridis')
+                axes[1, ii].set_title("Background")
+
+                # Bottom: mask visualisation
+                cmap = plt.cm.get_cmap('viridis', 4)
+                axes[2, ii].imshow(vis['mask_vis'], origin='lower', cmap=cmap, vmin=-0.5, vmax=3.5)
+                axes[2, ii].set_title("Mask")
+
+            plt.tight_layout()
+            plt.savefig(os.path.join(mosaic_dir, f'{gid}.png'), dpi=150)
+            plt.close(fig)            
             
-            im0 = axes[0, ii].imshow(image_data, origin='lower', cmap='magma', vmin=vmin, vmax=vmax)
-            axes[0, ii].set_title(f'{filter}', fontsize=10)
-            
-            # Plot the source aperture
-            source_aperture.plot(ax=axes[0, ii], color='blue', lw=4)
-            
-            im1 = axes[1, ii].imshow(background_plane, origin='lower', cmap='viridis')
-            
-            # Mask visualisation
-            cmap = plt.cm.get_cmap('viridis', 4)
-            im2 = axes[2, ii].imshow(mask_vis, origin='lower', cmap=cmap, vmin=-0.5, vmax=3.5)
-        
-        plt.tight_layout()
-        
-        os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, f'{galaxy_id}.png')
-        plt.savefig(filepath, dpi=150)
-        plt.close(fig)
         
 
 
@@ -609,10 +604,10 @@ def visualise_background(vis_data, fig_path=None):
     plt.colorbar(im0, ax=axes[0, 0], label='Flux [MJy/(sr pixel)]')
     
     # Plot the source aperture
-    source_aperture.plot(ax=axes[0, 0], color='red', lw=1.5)
+    source_aperture.plot(ax=axes[0, 0], color='blue', lw=4)
     
     # Overlay the segmentation mask as white outlines
-    axes[0, 0].contour(segm_mask, levels=[0.5], colors='blue', linewidths=1.5)
+    axes[0, 0].contour(segm_mask, levels=[0.5], colors='green', linewidths=2.5)
         
     axes[0, 0].set_title("Original Data with Aperture and Masked Regions")
     
@@ -817,7 +812,7 @@ def measure_flux(image_data, error_map, background_median, background_std, backg
 # --- Main Loop ---
 
 def perform_photometry(cutout_files, aperture_table, output_folder, suffix='', 
-                       fig_path=None, sigma=3.0, annulus_factor=3.0, apply_aper_corr=True):
+                       sigma=2.0, apply_aper_corr=True):
     """
     Main function to perform photometry on a list of cutout files.
     
@@ -829,16 +824,10 @@ def perform_photometry(cutout_files, aperture_table, output_folder, suffix='',
         Path to CSV table with aperture parameters
     output_folder : str
         Path to output folder
-    psf_data : FITS extension
-        Loaded FITS data extension (use number 3)
     suffix : str, optional
         Choose a custom filename extension to track version history
-    fig_path : str, optional
-        Path to the plot directory
     sigma : float, optional
-        Manually set threshold for the sigma clipping. Default value is 3.0
-    annulus_factor : float, optional
-        Manually set inner radius for the annulus (in terms of aperture size)
+        Manually set threshold for the sigma clipping. Default value is 2.0
     apply_aper_corr : bool, optional
         Decide whether aperture correction should be applied
     """
@@ -937,9 +926,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, suffix='',
         if filter_name == 'F770W' and galaxy_id in ['7136', '7904', '7922', '8469', '11716', 
                                                    '16424', '17000', '17669', '11137']:
             sigma = 2.0
-        
-        if fig_path is not None:
-            os.makedirs(fig_path, exist_ok=True)
+            
         
         #########################################################
         #####              Estimate Background              #####
@@ -951,8 +938,6 @@ def perform_photometry(cutout_files, aperture_table, output_folder, suffix='',
             image_data, 
             aperture_params,
             sigma_val=sigma, 
-            annulus_factor=annulus_factor, 
-            fig_path=fig_path
         )                                                                   
         
         #########################################################
