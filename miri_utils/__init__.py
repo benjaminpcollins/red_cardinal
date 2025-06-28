@@ -6,4 +6,4 @@ from .astrometry_utils import compute_centroid, save_alignment_figure, compute_o
 from .photometry_tools import adjust_aperture, estimate_background, get_psf, get_aperture_params, calculate_aperture_correction, measure_flux, \
     perform_photometry, create_fits_table_from_csv, compare_aperture_statistics, galaxy_statistics, plot_galaxy_filter_matrix, write_galaxy_stats, \
         save_vis, load_vis, create_mosaics
-from .stamp_maker import resample_nircam, normalise_image, preprocess_fits_image, make_stamp
+from .stamp_maker import resample_nircam, normalise_image, preprocess_fits_image, create_rgb_plot, make_stamps
