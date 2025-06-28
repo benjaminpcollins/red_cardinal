@@ -44,6 +44,10 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from matplotlib import pyplot as plt
 from scipy.ndimage import zoom
+from astropy.table import Table
+from astropy.stats import sigma_clipped_stats
+from collections import defaultdict
+from .photometry_tools import load_vis    
 
 def resample_nircam(indir, num_pixels):
     """
@@ -122,35 +126,28 @@ def normalise_image(img, stretch='asinh', Q=10, alpha=1, weight=1.0):
     numpy.ndarray
         Normalised image scaled between 0 and 1
     """
-    # Replace nans, positive and negative infinities with 0.0
     img = np.nan_to_num(img, nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # Clip possible negative fluxes
     img = np.clip(img, 0, None)
-    #print(f"Before any scaling: min={np.min(img)}, max={np.max(img)}")
+    img -= np.min(img)
     
-    # Subtract the minimum value to shift the range to start from 0
-    img_min = np.min(img)
-    img -= img_min
-    #print(f"After minimum subtraction: min={np.min(img)}, max={np.max(img)}")
-    #print(f"After weight scaling: min={np.min(img)}, max={np.max(img)}")
-    
-    # Determine which scaling to use
-    if stretch == 'asinh': # Lupton scaling
-        img_scaled = np.arcsinh(alpha * Q * img) / Q
+    if stretch == 'asinh':
+        img = np.arcsinh(alpha * Q * img) / Q
     elif stretch == 'log':
-        img_scaled = np.log10(1 + alpha * img)
+        img = np.log10(1 + alpha * img)
     elif stretch == 'linear':
-        img_scaled = img
+        pass
     else:
         raise ValueError("Unknown stretch")
-    #print(f"After stretch: min={np.min(img_scaled)}, max={np.max(img_scaled)}")
-    
-    # After stretching the image is normalised to 1
-    img_scaled = img_scaled / np.nanmax(img_scaled) if np.nanmax(img_scaled) != 0 else img_scaled
-    #print(f"After normalisation: min={np.min(img_scaled)}, max={np.max(img_scaled)}")
-    
-    return img_scaled
+
+    max_val = np.nanmax(img)
+    if max_val > 0:
+        img /= max_val
+
+    # Apply weight AFTER normalisation to adjust channel brightness
+    img *= weight
+    img = np.clip(img, 0, 1)
+
+    return img
 
 def preprocess_fits_image(filename, ext=0, stretch='asinh', Q=10, alpha=1, weight=1, normalise=False):
     """
@@ -188,82 +185,229 @@ def preprocess_fits_image(filename, ext=0, stretch='asinh', Q=10, alpha=1, weigh
     except Exception as e:
         raise RuntimeError(f"Could not open {filename}[{ext}]: {e}")
     
-    # Remove NaNs and negative values for display purposes
-    flat = img.flatten()
-    flat = flat[np.isfinite(flat)] # remove NaNs/Infs
-    
-    # Sort pixel values
-    sorted_pixels = np.sort(flat)
-    
-    # Get the lower X% of the pixels for background estimation
-    cutoff_index = int(len(sorted_pixels) * 0.8)
-    faint_pixels = sorted_pixels[:cutoff_index]
-    
-    # Compute robust mean (using two methods - the second is currently used)
-    background_mean = np.mean(faint_pixels)  # Statistical background from faint pixels
-    background_mean = np.nanmean(img)        # Simple mean ignoring NaNs
-    
-    # Replace NaN values with background
-    img = np.where(np.isnan(img), background_mean, img)
-    
-    # Shift minimum to zero
-    img -= np.min(img)
-    
-    # Ensure all values are non-negative before stretch
-    img[img < 0] = 0.0
-    
-    # Apply stretch
-    if stretch == 'asinh':
-        img = np.arcsinh(Q * alpha * img) / Q
-    elif stretch == 'linear':
-        pass # No stretch applied
-    else:
-        raise ValueError(f"Unsupported stretch: {stretch}")
-    
-    # Normalise if requested
-    if normalise:
-        max_val = np.nanmax(img)
-        if max_val > 0:
-            img /= max_val
-    
-    return img
+    # Background estimation could be improved here
+    mean, median, std = sigma_clipped_stats(img, sigma=3.0)
+    img = np.where(np.isnan(img), median, img)
+    img = np.clip(img, 0, None)
 
-def make_stamp(imagesRGB, Q_r, alpha_r, weight_r, Q_g, alpha_g, weight_g, Q_b, alpha_b, weight_b=1.0, stretch='asinh', outfile='stamp.pdf'):
+    return normalise_image(img, stretch=stretch, Q=Q, alpha=alpha, weight=weight)
+
+
+
+
+def make_stamps(table_path, cutout_dir, output_dir):
     """
-    Create RGB composite images from multiple FITS files with customizable
-    stretch parameters for each color channel.
+    Create RGB composite images for galaxies with different numbers of available filters.
+    Combines image processing and RGB creation into one comprehensive function.
     
-    This function processes multiple FITS images to create both individual grayscale
-    representations of each filter and a composite RGB image. It handles cases where
-    all three channels (R,G,B) are available or when only R and B are available.
+    Filter assignment rules:
+    - NIRCam filter: F444W (always available)
+    - MIRI filters: F770W, F1000W, F1800W, F2100W
+    - 1 MIRI Filter: Use F444W as blue and MIRI as red
+    - 2 MIRI Filters: Use F444W as blue and MIRI as green and red
+    - 3-4 MIRI filters: Only use MIRI filters
     
     Parameters:
     -----------
-    imagesRGB : dict
-        Dictionary with keys 'R', 'G', 'B' containing lists of FITS filenames
-        for each color channel (e.g., {'R': ['file1.fits[0]'], 'G': ['file2.fits[0]']})
-    Q_r, Q_g, Q_b : float
-        Q parameter for asinh stretch for R, G, B channels
-    alpha_r, alpha_g, alpha_b : float
-        Alpha parameter for asinh stretch for R, G, B channels
-    weight_r, weight_g, weight_b : float
-        Weight multipliers for R, G, B channels
-    stretch : str, optional
-        Type of stretch to apply ('asinh' or 'linear')
-    outfile : str, optional
-        Output filename for the RGB composite image
-        
-    Returns:
-    --------
-    None
-        Saves composite RGB image to outfile and filter panels to outfile_filters.pdf
+    table_path : str
+        Path to FITS table containing galaxy IDs and filter information
+    cutout_dir : str  
+        Directory containing FITS cutout files
+    output_dir : str
+        Directory to save output RGB composite images
     """
-    # Parameter dictionary to handle values per channel
-    params = {
-        'R': {'Q': Q_r, 'alpha': alpha_r, 'weight': weight_r},
-        'G': {'Q': Q_g, 'alpha': alpha_g, 'weight': weight_g},
-        'B': {'Q': Q_b, 'alpha': alpha_b, 'weight': weight_b}
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    table = Table.read(table_path, format='fits')
+
+    if 'Filters' not in table.colnames or 'ID' not in table.colnames:
+        raise ValueError("FITS table must contain 'Filters' and 'ID' columns.")
+
+    # Define filter categories
+    NIRCAM_FILTER = 'F444W'
+    MIRI_FILTERS = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+    
+    # Group galaxies by number of MIRI filters available
+    miri_filters_per_count = defaultdict(list)
+
+    vis_dict ={}
+    for row in table:
+        gid = row['ID']
+        filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
+        
+        vis_array = []
+        for filt in filters:
+            vis_file = f'{gid}_{filt}.h5'
+            vis_array.append(vis_file)
+        
+        # Add all the vis_data to the vis_dict for each galaxy ID
+        vis_dict[gid] = vis_array
+        
+        # Count MIRI filters available for this galaxy
+        miri_available = [f for f in filters if f in MIRI_FILTERS]
+        miri_count = len(miri_available)
+        
+        miri_filters_per_count[miri_count].append((gid, filters, miri_available))
+    
+    # Define default stretch parameters for different filters
+    default_params = {
+        'F444W': {'Q': 12, 'alpha': 0.08, 'weight': 1.6},  # Blue (strong boost)
+        'F770W': {'Q': 10, 'alpha': 0.10, 'weight': 0.4},  # Red (heavily suppressed)
+        'F1000W': {'Q': 10, 'alpha': 0.08, 'weight': 0.7}, # Optional green/alt
+        'F1800W': {'Q': 4,  'alpha': 0.25, 'weight': 0.3}, # MIRI long - suppressed
+        'F2100W': {'Q': 3,  'alpha': 0.30, 'weight': 0.2}  # MIRI longest - heavily suppressed
     }
+    
+     # Default fallback parameters
+    default_fallback = {'Q': 8, 'alpha': 0.12, 'weight': 1.0}
+
+    # Get parameters for each channel with blue boost
+    def get_channel_params(filter_name, is_red=False, is_green=False, is_blue=False):
+        params = default_params.get(filter_name, default_fallback).copy()
+        if is_red:
+            # Weaken red significantly
+            params['weight'] *= 0.3    # Drastically reduce red brightness
+            params['Q'] = min(params['Q'], 8)  # Make red flatter (less contrast)
+            params['alpha'] *= 1.3     # Make stretch flatter
+
+        elif is_green:
+            # Modest green boost
+            params['weight'] *= 1.4
+            params['Q'] = max(params['Q'], 10)
+            params['alpha'] *= 0.9
+
+        elif is_blue:
+            # Strong blue boost
+            params['weight'] *= 1.7
+            params['Q'] = max(params['Q'], 12)
+            params['alpha'] *= 0.8
+
+        return params
+    
+    def find_cutout_file(gid, filter_name, cutout_dir):
+        """Find the actual cutout file matching the pattern."""
+        pattern = os.path.join(cutout_dir, f'{gid}_{filter_name}_cutout*.fits')
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]  # Return first match
+        else:
+            raise FileNotFoundError(f"No cutout file found for {gid} with filter {filter_name}")
+
+    
+    # Main processing loop
+    for miri_count in sorted(miri_filters_per_count.keys()):
+        print(f"\nProcessing {len(miri_filters_per_count[miri_count])} galaxies with {miri_count} MIRI filter(s):")
+        
+        for gid, all_filters, miri_available in miri_filters_per_count[miri_count]:
+            print(f"  Processing {gid}: MIRI filters = {', '.join(miri_available) if miri_available else 'None'}")
+            
+            try:
+                if miri_count == 0:
+                    # No MIRI filters available, skip this galaxy
+                    print(f"    ✗ Skipping {gid}: No MIRI filters available")
+                    continue
+                    
+                elif miri_count == 1:
+                    # 1 MIRI Filter: Use F444W as blue and MIRI as red
+                    b_file = find_cutout_file(gid, NIRCAM_FILTER, cutout_dir)
+                    r_file = find_cutout_file(gid, miri_available[0], cutout_dir)
+                    
+                    imagesRGB = {
+                        'R': [r_file + '[0]'], 
+                        'G': ['fake_green.fits[0]'], 
+                        'B': [b_file + '[0]']
+                    }
+                    print(f"    Using filters: R={miri_available[0]}, G=fake, B={NIRCAM_FILTER}")
+                
+                elif miri_count == 2:
+                    # 2 MIRI Filters: Use F444W as blue and MIRI as green and red
+                    b_file = find_cutout_file(gid, NIRCAM_FILTER, cutout_dir)
+                    
+                    # Sort MIRI filters by wavelength
+                    sorted_miri = miri_available
+                    g_file = find_cutout_file(gid, sorted_miri[0], cutout_dir)  # Shorter wavelength
+                    r_file = find_cutout_file(gid, sorted_miri[1], cutout_dir)  # Longer wavelength
+                    
+                    imagesRGB = {
+                        'R': [r_file + '[0]'], 
+                        'G': [g_file + '[0]'], 
+                        'B': [b_file + '[0]']
+                    }
+                    print(f"    Using filters: R={sorted_miri[1]}, G={sorted_miri[0]}, B={NIRCAM_FILTER}")
+                
+                elif miri_count >= 3:
+                    # 3-4 MIRI filters: Only use MIRI filters
+                    # Sort MIRI filters by wavelength
+                    sorted_miri = sorted(miri_available, key=lambda x: int(x[1:5]))
+                    
+                    if miri_count == 3:
+                        # Use all 3 MIRI filters
+                        b_file = find_cutout_file(gid, sorted_miri[0], cutout_dir)  # Shortest
+                        g_file = find_cutout_file(gid, sorted_miri[1], cutout_dir)  # Middle
+                        r_file = find_cutout_file(gid, sorted_miri[2], cutout_dir)  # Longest
+                        
+                        print(f"    Using filters: R={sorted_miri[2]}, G={sorted_miri[1]}, B={sorted_miri[0]}")
+                    
+                    else:  # miri_count == 4
+                        # Use 3 out of 4 MIRI filters with good spacing
+                        b_file = find_cutout_file(gid, sorted_miri[0], cutout_dir)  # Shortest
+                        g_file = find_cutout_file(gid, sorted_miri[2], cutout_dir)  # Third
+                        r_file = find_cutout_file(gid, sorted_miri[3], cutout_dir)  # Longest
+                        
+                        print(f"    Using filters: R={sorted_miri[3]}, G={sorted_miri[2]}, B={sorted_miri[0]}")
+                        print(f"    Skipping: {sorted_miri[1]}")
+                    
+                    imagesRGB = {
+                        'R': [r_file + '[0]'], 
+                        'G': [g_file + '[0]'], 
+                        'B': [b_file + '[0]']
+                    }
+                
+                # Get parameters for each channel based on the filters being used
+                r_filter = os.path.basename(imagesRGB['R'][0]).split('_')[1] if 'fake' not in imagesRGB['R'][0] else 'F2100W'
+                g_filter = os.path.basename(imagesRGB['G'][0]).split('_')[1] if 'fake' not in imagesRGB['G'][0] else 'F1000W'  
+                b_filter = os.path.basename(imagesRGB['B'][0]).split('_')[1] if 'fake' not in imagesRGB['B'][0] else 'F444W'
+                
+                rgb_params = {
+                    'R': get_channel_params(r_filter, is_red=True),
+                    'G': get_channel_params(g_filter, is_green=True), 
+                    'B': get_channel_params(b_filter, is_blue=True) # Boost blue channel
+                }
+
+                # Create output filename
+                outfile = os.path.join(output_dir, f'{gid}_rgb.pdf')
+
+                # Create RGB composite using simplified parameter passing
+                create_rgb_plot(
+                    imagesRGB=imagesRGB,
+                    params=rgb_params,
+                    stretch='asinh',
+                    outfile=outfile
+                )
+                
+                print(f"    ✓ Created: {outfile}")
+                
+            except Exception as e:
+                print(f"    ✗ Error processing {gid}: {str(e)}")
+                continue
+    
+    print(f"\nRGB composite creation complete. Output saved to: {output_dir}")
+    
+    
+    
+def create_rgb_plot(imagesRGB, params, stretch, outfile):
+    """
+    Function to create RGB composite from processed images.
+    
+    Args:
+        imagesRGB: Image data
+        params: Dict with 'r', 'g', 'b' keys, each containing Q, alpha, weight
+        stretch: Stretch method
+        outfile: Output file path
+    """
+    print("Creating RGB image now...")
     
     stretched_images = {}
     global_max = 0.0
@@ -272,6 +416,11 @@ def make_stamp(imagesRGB, Q_r, alpha_r, weight_r, Q_g, alpha_g, weight_g, Q_b, a
     # Stretch each image and find the global max
     for colour in ['R', 'G', 'B']:
         image_str = imagesRGB[colour][0]
+        
+        if 'fake' in image_str:
+            stretched_images[colour] = None  # We'll fill it later
+            continue
+        
         fname, ext = image_str.split('[')
         ext = int(ext.replace(']', ''))
         colour_params = params[colour]
@@ -289,12 +438,22 @@ def make_stamp(imagesRGB, Q_r, alpha_r, weight_r, Q_g, alpha_g, weight_g, Q_b, a
         max_val = np.nanmax(stretched)
         if max_val > global_max:
             global_max = max_val
+        
     
-    # Now normalise all images to global max for proper relative brightness
-    norm_images = {}
-    for colour in ['B', 'G', 'R']:
-        norm_images[colour] = stretched_images[colour] / global_max
-        norm_images[colour] = np.clip(norm_images[colour], 0, 1)
+    # Now fill in any missing (fake) channel using shape from a valid one
+    ref_shape = None
+    for colour in ['R', 'B']:
+        if stretched_images[colour] is not None:
+            ref_shape = stretched_images[colour].shape
+            break
+    if ref_shape is None:
+        raise ValueError("No valid image to infer shape from for fake channel.")
+
+    for colour in ['R', 'G', 'B']:
+        if stretched_images[colour] is None:
+            stretched_images[colour] = np.zeros(ref_shape)
+        
+    norm_images = {c: np.clip(stretched_images[c] / global_max, 0, 1) for c in ['B', 'G', 'R']}
     
     # Add scaled images to the dictionary for temporary storage
     temp_files = {}
@@ -319,7 +478,7 @@ def make_stamp(imagesRGB, Q_r, alpha_r, weight_r, Q_g, alpha_g, weight_g, Q_b, a
         
         # Legend info
         legend_text = f"R: {os.path.basename(imagesRGB['R'][0]).split('_')[1]}\n" \
-                      f"B: {os.path.basename(imagesRGB['B'][0]).split('_')[1]}"
+                    f"B: {os.path.basename(imagesRGB['B'][0]).split('_')[1]}"
         
         for ax, colour in zip(axes, ['B', 'R']):
             ax.imshow(norm_images[colour], cmap='gray', origin='lower')
@@ -334,8 +493,8 @@ def make_stamp(imagesRGB, Q_r, alpha_r, weight_r, Q_g, alpha_g, weight_g, Q_b, a
         
         # Legend info
         legend_text = f"R: {os.path.basename(imagesRGB['R'][0]).split('_')[1]}\n" \
-                      f"G: {os.path.basename(imagesRGB['G'][0]).split('_')[1]}\n" \
-                      f"B: {os.path.basename(imagesRGB['B'][0]).split('_')[1]}"
+                    f"G: {os.path.basename(imagesRGB['G'][0]).split('_')[1]}\n" \
+                    f"B: {os.path.basename(imagesRGB['B'][0]).split('_')[1]}"
         
         for ax, colour in zip(axes, ['B', 'G', 'R']):
             ax.imshow(norm_images[colour], cmap='gray', origin='lower')

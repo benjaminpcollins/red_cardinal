@@ -31,7 +31,7 @@ Requirements
 
 Usage
 -----
-- Ensure global_cat is defined with the expected structure (including 'id', 'ra', 'dec' columns and offset placeholders).
+- Ensure cat is defined with the expected structure (including 'id', 'ra', 'dec' columns and offset placeholders).
 - Call the compute_offset function to compute centroids and offsets for each galaxy in the catalogue.
 - Use save_alignment_figure for visual verification of alignment.
 - Export summary statistics with write_offset_stats.
@@ -135,12 +135,10 @@ def save_alignment_figure(g, cutout_nircam, cutout_miri, centroid_nircam, centro
     #print(f"Saved figure: {output_path}")
 
 
-def compute_offset(cutout_folder, out_basename, survey, filter, obs="", save_fig=True, smooth_miri=True):
+def compute_offset(cutout_folder, output_folder, cat, survey, filter, obs="", save_fig=True, smooth_miri=True, use_filters=False):
     """Computes the astrometric offset between NIRCam and MIRI for each galaxy."""
     
-    global global_cat
-    
-    for i, g in enumerate(global_cat):
+    for i, g in enumerate(cat):
         #print(f"Processing galaxy {g['id']}...")
 
         ref_position = SkyCoord(ra=g['ra'], dec=g['dec'], unit=u.deg)
@@ -178,19 +176,25 @@ def compute_offset(cutout_folder, out_basename, survey, filter, obs="", save_fig
         
         if save_fig == True:
             # Save alignment figure
-            output_dir = f"/home/bpc/University/master/Red_Cardinal/{out_basename}/{survey}{obs}/"
+            output_dir = os.path.join(output_folder, f"{survey}{obs}/")
+            os.makedirs(output_dir, exist_ok=True)
             save_alignment_figure(g, cutout_nircam, cutout_miri, centroid_nircam, centroid_miri, output_dir, survey, filter)
 
+        if use_filters == True:
+            filter_l = '_' + filter.lower()
+        else:
+            filter_l = ''
+        
         # Compute offsets
         dra, ddec = centroid_nircam.spherical_offsets_to(centroid_miri)
-        global_cat[f'{survey}{obs}_dra'][i] = dra.to(u.arcsec).value
-        global_cat[f'{survey}{obs}_ddec'][i] = ddec.to(u.arcsec).value
+        cat[f'{survey}{obs}{filter_l}_dra'][i] = dra.to(u.arcsec).value
+        cat[f'{survey}{obs}{filter_l}_ddec'][i] = ddec.to(u.arcsec).value
 
         #print(f"Offset: ΔRA = {dra.to(u.arcsec)}, ΔDec = {ddec.to(u.arcsec)}")
 
 
 
-def write_offset_stats(df, dra, ddec, output_dir, filter):
+def write_offset_stats(df, dra, ddec, output_dir, survey, filter):
     """Write mean and std of astrometric offsets to a JSON file.
 
     Args:
@@ -212,8 +216,7 @@ def write_offset_stats(df, dra, ddec, output_dir, filter):
     # Ensure the output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
-    survey = dra.replace('_dra', '')
-    filename = f"offset_orig_{survey}_{filter}_stats.json"
+    filename = f"offset_{survey}_{filter}_stats.json"
     # Write to JSON
     output_path = os.path.join(output_dir, filename)
     with open(output_path, 'w') as f:
@@ -223,7 +226,7 @@ def write_offset_stats(df, dra, ddec, output_dir, filter):
 
 
 
-def visualise_offsets(df, survey, output_dir, exclude_ids, filter, outlier_thresh):
+def visualise_offsets(df, survey, output_dir, exclude_ids, filter, use_filters=False):
     """
     Produces three types of plots for the astrometric offsets (Scatter, Quiver, and Histogram)
     and returns the filtered DataFrame for further analysis.
@@ -233,7 +236,6 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, outlier_thres
         survey (str): The name of the survey (primer or cweb plus observation number)
         output_dir (str): Path to the output directory.
         exclude_ids (list[int]): A list of galaxy IDs to be excluded from analysis.
-        outlier_thresh (float): A threshold for the maximum degree of scatter before an offset is considered an outlier.
 
     Returns:
         pandas DataFrame: The filtered DataFrame for further analysis.
@@ -246,29 +248,38 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, outlier_thres
     df = df[~df['id'].isin(exclude_ids)].copy()
 
     # Find corresponding ddec column
-    col1 = survey + '_dra'
-    col2 = survey + '_ddec'
+    if use_filters == True:
+        col1 = survey + f'_{filter.lower()}_dra'
+        col2 = survey + f'_{filter.lower()}_ddec'
+    else:
+        col1 = survey + '_dra'
+        col2 = survey + '_ddec'
 
     # Remove rows where col1 is exactly 0.0
     df_new = df[df[col1] != 0.0].copy()
 
     # Determine survey name
-    survey = 'PRIMER' if 'primer' in col1 else 'COSMOS-Web'
+    if 'primer' in col1:
+        survey_cap = 'PRIMER' 
+    elif 'cosmos' in col1:
+        survey_cap = 'COSMOS-3D'
+    else: 
+        survey_cap = 'COSMOS-Web'
 
     # ---- Compute Statistics ----
-    write_offset_stats(df_new, col1, col2, output_dir, filter)
+    write_offset_stats(df_new, col1, col2, output_dir, survey, filter)
     
     # ---- Scatter Plot ----
-    plot_dir = os.path.join(output_dir, 'plots/')
+    plot_dir = os.path.join(output_dir, 'scatter_plots/')
     os.makedirs(plot_dir, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(6, 5))
     ax.scatter(df_new[col1], df_new[col2], s=10, alpha=0.7)
     ax.set_xlabel('ΔRA (arcsec)')
     ax.set_ylabel('ΔDec (arcsec)')
-    ax.set_title(f'{survey} Astrometric Offset\n{filter} MIRI vs F444W NIRCam')
+    ax.set_title(f'{survey_cap} Astrometric Offset\n{filter} MIRI vs F444W NIRCam')
 
-    scatter_path = os.path.join(plot_dir, col1.replace('dra', f'offset_orig_{filter}_scatter.png'))
+    scatter_path = os.path.join(plot_dir, f'{survey}_offset_{filter}_scatter.png')
     fig.savefig(scatter_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
@@ -278,7 +289,7 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, outlier_thres
     ax.quiver(df_new['ra'], df_new['dec'], df_new[col1], df_new[col2], angles='xy', scale_units='xy', scale=1)
     ax.set_xlabel('RA')
     ax.set_ylabel('Dec')
-    ax.set_title(f'{survey} Astrometric Offset\n{filter} MIRI vs F444W NIRCam')
+    ax.set_title(f'{survey_cap} Astrometric Offset\n{filter} MIRI vs F444W NIRCam')
 
     # Calculate and adjust axis limits to fit all arrows
     ra_min, ra_max = df_new['ra'].min(), df_new['ra'].max()
@@ -288,7 +299,7 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, outlier_thres
     ax.set_xlim(ra_min - arrow_max, ra_max + arrow_max)
     ax.set_ylim(dec_min - arrow_max, dec_max + arrow_max)
 
-    quiver_path = os.path.join(plot_dir, col1.replace('dra', f'offset_orig_{filter}_arrows.png'))
+    quiver_path = os.path.join(plot_dir, f'{survey}_offset_{filter}_arrows.png')
     fig.savefig(quiver_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
@@ -303,7 +314,7 @@ def visualise_offsets(df, survey, output_dir, exclude_ids, filter, outlier_thres
     axs[1].set_title("ΔDec (arcsec)")
     axs[1].set_xlabel("Offset (arcsec)")
 
-    hist_path = os.path.join(plot_dir, col1.replace('dra', f'offset_orig_{filter}_histogram.png'))
+    hist_path = os.path.join(plot_dir, f'{survey}_offset_{filter}_hist.png')
     fig.savefig(hist_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
     
@@ -352,3 +363,45 @@ def get_mean_stats(filename):
     ddec_mean = stats["ddec_mean"]
     return dra_mean, ddec_mean
 
+
+# Function to plot offsets in polar coordinates
+def plot_astrometric_offsets(df1, df2, label1, label2, output_dir, band):
+    # Convert RA/Dec offsets to polar coordinates
+    def to_polar(dra, ddec):
+        r = np.sqrt(dra**2 + ddec**2)
+        theta = np.arctan2(ddec, dra)  # angle from x-axis (RA), in radians
+        return r, theta
+
+    r1, theta1 = to_polar(df1['dra'], df1['ddec'])
+    r2, theta2 = to_polar(df2['dra'], df2['ddec'])
+
+    # Plot
+    fig = plt.figure(figsize=(8, 8))
+    ax = plt.subplot(111, polar=True)
+    ax.scatter(theta1, r1, s=10, alpha=0.6, label=label1)
+    ax.scatter(theta2, r2, s=10, alpha=0.6, label=label2)
+
+    # Plot mean offset vectors
+    for r, t, label, col in zip(
+        [r1, r2],
+        [theta1, theta2],
+        [label1, label2],
+        ['tab:blue', 'tab:orange']
+    ):
+        r_mean = np.mean(r)
+        t_mean = np.arctan2(np.mean(np.sin(t)), np.mean(np.cos(t)))
+        ax.scatter(t_mean, r_mean, color=col, label=f'{label} mean')
+
+    ax.set_title(f'Astrometric Offsets (F444W → {band})', fontsize=14)
+    ax.set_rmax(0.5)
+    ax.set_rticks([0.1, 0.2, 0.3, 0.4, 0.5])  # arcsec
+    ax.set_rlabel_position(135)
+    ax.grid(True)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+
+    # Save
+    figname = output_dir + f'polar_offset_{band}.png'
+    print(f'Figure saved to {figname}')
+    plt.tight_layout()
+    plt.savefig(figname)
+    plt.show()
