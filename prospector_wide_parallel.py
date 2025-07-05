@@ -37,7 +37,7 @@ def get_zred(objid):
     Returns:
     float: The absolute value of the redshift corresponding to the given object ID.
     """
-    dat_zred = np.loadtxt('/Users/letiziabugiani/Desktop/bluejay/spectroscopy/redshifts_v0.1.txt', dtype=[('galid', int),('zred', '<f8')])
+    dat_zred = np.loadtxt('/home/bpc/University/master/Red_Cardinal/catalogues/redshifts.txt', dtype=[('galid', int),('zred', '<f8')])
     return abs(dat_zred['zred'][dat_zred['galid'] == objid][0])
 
 def get_MAP(results,verbose=False):

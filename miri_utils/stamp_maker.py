@@ -41,64 +41,10 @@ import os
 import glob
 import numpy as np
 from astropy.io import fits
-from astropy.wcs import WCS
 from matplotlib import pyplot as plt
-from scipy.ndimage import zoom
 from astropy.table import Table
 from astropy.stats import sigma_clipped_stats
 from collections import defaultdict
-from .photometry_tools import load_vis    
-
-def resample_nircam(indir, num_pixels):
-    """
-    Resamples NIRCam FITS images to a specified square pixel dimension.
-    
-    This function searches for NIRCam FITS files in the provided directory,
-    resamples them to the specified number of pixels (square), and updates
-    the WCS information accordingly to maintain astrometric accuracy.
-    
-    Parameters:
-    -----------
-    indir : str
-        Directory containing NIRCam FITS files to process
-    num_pixels : int
-        Target image size in pixels (will create num_pixels × num_pixels images)
-        
-    Returns:
-    --------
-    None
-        Writes resampled images to disk with '_res.fits' suffix
-    """
-    # Open the FITS files
-    fits_files = glob.glob(os.path.join(indir, '*nircam.fits'))
-    for file_path in fits_files:
-        with fits.open(file_path) as hdul:
-            data = hdul[0].data
-            header = hdul[0].header
-            wcs = WCS(header)
-            
-            # Resample the image
-            target_shape = (num_pixels, num_pixels)
-            ny_old, nx_old = data.shape
-            ny_new, nx_new = target_shape
-            zoom_y = ny_new / ny_old
-            zoom_x = nx_new / nx_old
-            resampled_data = zoom(data, (zoom_y, zoom_x), order=1, mode='nearest')
-            
-            # Update WCS information
-            header['NAXIS1'] = nx_new
-            header['NAXIS2'] = ny_new
-            if 'CDELT1' in header and 'CDELT2' in header:
-                header['CDELT1'] /= zoom_x
-                header['CDELT2'] /= zoom_y
-            if 'CD1_1' in header and 'CD2_2' in header:
-                header['CD1_1'] /= zoom_x
-                header['CD2_2'] /= zoom_y
-                
-            # Write new FITS file to the same directory
-            out_path = file_path.replace('.fits', '_res.fits')
-            fits.writeto(out_path, resampled_data, header, overwrite=True)
-            print(f"Saved resampled file to: {out_path}")
 
 def normalise_image(img, stretch='asinh', Q=10, alpha=1, weight=1.0):
     """
