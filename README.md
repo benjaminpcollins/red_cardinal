@@ -11,8 +11,8 @@ red_cardinal/
 │   ├── astrometry_utils.py        
 │   ├── cutout_tools.py
 │   ├── photometry_tools.py
-│   ├── rotation_utils.py
-│   └── stamp_maker.py
+│   ├── stamp_maker.py
+│   └── prospector_utils.py
 │
 ├── astrometry.ipynb         
 ├── make_stamps.ipynb        
