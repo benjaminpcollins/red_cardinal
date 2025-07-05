@@ -61,6 +61,7 @@ import astropy.units as u
 from astropy.nddata import Cutout2D
 from photutils import centroids
 from .cutout_tools import load_cutout
+from matplotlib.patches import Circle
 
 # Suppress common WCS-related warnings that don't affect functionality
 warnings.simplefilter("ignore", category=FITSFixedWarning)
@@ -364,44 +365,102 @@ def get_mean_stats(filename):
     return dra_mean, ddec_mean
 
 
-# Function to plot offsets in polar coordinates
-def plot_astrometric_offsets(df1, df2, label1, label2, output_dir, band):
-    # Convert RA/Dec offsets to polar coordinates
-    def to_polar(dra, ddec):
-        r = np.sqrt(dra**2 + ddec**2)
-        theta = np.arctan2(ddec, dra)  # angle from x-axis (RA), in radians
-        return r, theta
+def plot_offsets_polar(output_dir, output_basename, data_dict, title=None, plot_type='all'):
+    """
+    Plots astrometric offsets in polar coordinates (angle vs radial offset).
 
-    r1, theta1 = to_polar(df1['dra'], df1['ddec'])
-    r2, theta2 = to_polar(df2['dra'], df2['ddec'])
+    Parameters:
+    - output_dir: directory to save plots
+    - output_basename: base name (without extension) for saved figures
+    - data_dict: dictionary where keys are labels and values are DataFrames with 'dra' and 'ddec'
+    - title: title of the figure
+    - avg: if true plots average values, else single data points of the df
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
-    # Plot
-    fig = plt.figure(figsize=(8, 8))
-    ax = plt.subplot(111, polar=True)
-    ax.scatter(theta1, r1, s=10, alpha=0.6, label=label1)
-    ax.scatter(theta2, r2, s=10, alpha=0.6, label=label2)
+    rmax = 0.4
+    
+    if plot_type=='all':
 
-    # Plot mean offset vectors
-    for r, t, label, col in zip(
-        [r1, r2],
-        [theta1, theta2],
-        [label1, label2],
-        ['tab:blue', 'tab:orange']
-    ):
-        r_mean = np.mean(r)
-        t_mean = np.arctan2(np.mean(np.sin(t)), np.mean(np.cos(t)))
-        ax.scatter(t_mean, r_mean, color=col, label=f'{label} mean')
+        # Auto-generate a colour map using matplotlib colormap
+        labels = list(data_dict.keys())
+        cmap = plt.get_cmap('tab10')  # or 'Set1', 'tab20', etc.
+        colour_map = {label: cmap(i % cmap.N) for i, label in enumerate(labels)}
 
-    ax.set_title(f'Astrometric Offsets (F444W → {band})', fontsize=14)
-    ax.set_rmax(0.5)
-    ax.set_rticks([0.1, 0.2, 0.3, 0.4, 0.5])  # arcsec
-    ax.set_rlabel_position(135)
-    ax.grid(True)
-    ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+        fig = plt.figure(figsize=(9, 9))
+        fig.subplots_adjust(right=0.75)  # Shrinks subplot to 75% of figure width, leaves 25% empty on right
+        ax = plt.subplot(111, polar=True)
+        handles_datasets = []
+        handles_averages = []
 
-    # Save
-    figname = output_dir + f'polar_offset_{band}.png'
-    print(f'Figure saved to {figname}')
-    plt.tight_layout()
-    plt.savefig(figname)
-    plt.show()
+        for label, df in data_dict.items():
+            colour = colour_map[label]
+
+            dra = df['dra'].to_numpy()
+            ddec = df['ddec'].to_numpy()
+
+            r = np.sqrt(dra**2 + ddec**2)
+            theta = np.arctan2(ddec, dra)
+
+            # Choose marker shape
+            if '3D' in label:
+                marker_style = 's'  # square
+            else:
+                marker_style = 'o'  # circle
+                
+            # Scatter for dataset
+            scatter = ax.scatter(theta, r, alpha=0.5, label=label, color=colour, marker=marker_style)
+            handles_datasets.append(scatter)
+
+            # Scatter for average
+            mean_dra = np.mean(dra)
+            mean_ddec = np.mean(ddec)
+            r_avg = np.sqrt(mean_dra**2 + mean_ddec**2)
+            theta_avg = np.arctan2(mean_ddec, mean_dra)
+            avg_scatter = ax.scatter(theta_avg, r_avg, label=label+' (avg)', s=100, edgecolor='k', color=colour, marker=marker_style)
+            handles_averages.append(avg_scatter)
+            
+        if title: ax.set_title(title, va='bottom')
+        ax.set_rmax(rmax)
+        #ax.set_rticks([0.2, 0.4, 0.6])  # optional
+        ax.set_theta_zero_location("E")  # 0° = East = +RA
+        ax.set_theta_direction(-1)       # angles increase clockwise (RA leftward)
+        ax.grid(True)
+
+        all_handles = handles_datasets + handles_averages
+        all_labels = [h.get_label() for h in all_handles]
+
+        ax.legend(all_handles, all_labels, loc='upper right', bbox_to_anchor=(1.3, 1.0))
+
+        figname = os.path.join(output_dir, f"{output_basename}_polar.png")
+        plt.tight_layout()
+        plt.savefig(figname, bbox_inches='tight')
+        plt.show()
+
+    elif plot_type=='avg':
+        # Plot average offsets
+        fig = plt.figure(figsize=(8, 8))
+        ax = plt.subplot(111, polar=True)
+
+        for label, df in data_dict.items():
+            mean_dra = np.mean(df['dra'])
+            mean_ddec = np.mean(df['ddec'])
+
+            label += ' Avg'
+            r_avg = np.sqrt(mean_dra**2 + mean_ddec**2)
+            theta_avg = np.arctan2(mean_ddec, mean_dra)
+
+            ax.scatter(theta_avg, r_avg, label=label, s=100, edgecolor='k')
+
+        if title: ax.set_title(title, va='bottom')
+        ax.set_rmax(rmax)
+        #ax.set_rticks([0.2, 0.4, 0.6])
+        ax.set_theta_zero_location("E")
+        ax.set_theta_direction(-1)
+        ax.grid(True)
+        ax.legend(loc='upper right', bbox_to_anchor=(1.3, 1.1))
+
+        figname_avg = os.path.join(output_dir, f"{output_basename}_avg_polar.png")
+        plt.savefig(figname_avg, bbox_inches='tight')
+        plt.show()

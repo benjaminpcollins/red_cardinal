@@ -41,64 +41,10 @@ import os
 import glob
 import numpy as np
 from astropy.io import fits
-from astropy.wcs import WCS
 from matplotlib import pyplot as plt
-from scipy.ndimage import zoom
 from astropy.table import Table
 from astropy.stats import sigma_clipped_stats
 from collections import defaultdict
-from .photometry_tools import load_vis    
-
-def resample_nircam(indir, num_pixels):
-    """
-    Resamples NIRCam FITS images to a specified square pixel dimension.
-    
-    This function searches for NIRCam FITS files in the provided directory,
-    resamples them to the specified number of pixels (square), and updates
-    the WCS information accordingly to maintain astrometric accuracy.
-    
-    Parameters:
-    -----------
-    indir : str
-        Directory containing NIRCam FITS files to process
-    num_pixels : int
-        Target image size in pixels (will create num_pixels × num_pixels images)
-        
-    Returns:
-    --------
-    None
-        Writes resampled images to disk with '_res.fits' suffix
-    """
-    # Open the FITS files
-    fits_files = glob.glob(os.path.join(indir, '*nircam.fits'))
-    for file_path in fits_files:
-        with fits.open(file_path) as hdul:
-            data = hdul[0].data
-            header = hdul[0].header
-            wcs = WCS(header)
-            
-            # Resample the image
-            target_shape = (num_pixels, num_pixels)
-            ny_old, nx_old = data.shape
-            ny_new, nx_new = target_shape
-            zoom_y = ny_new / ny_old
-            zoom_x = nx_new / nx_old
-            resampled_data = zoom(data, (zoom_y, zoom_x), order=1, mode='nearest')
-            
-            # Update WCS information
-            header['NAXIS1'] = nx_new
-            header['NAXIS2'] = ny_new
-            if 'CDELT1' in header and 'CDELT2' in header:
-                header['CDELT1'] /= zoom_x
-                header['CDELT2'] /= zoom_y
-            if 'CD1_1' in header and 'CD2_2' in header:
-                header['CD1_1'] /= zoom_x
-                header['CD2_2'] /= zoom_y
-                
-            # Write new FITS file to the same directory
-            out_path = file_path.replace('.fits', '_res.fits')
-            fits.writeto(out_path, resampled_data, header, overwrite=True)
-            print(f"Saved resampled file to: {out_path}")
 
 def normalise_image(img, stretch='asinh', Q=10, alpha=1, weight=1.0):
     """
@@ -232,25 +178,17 @@ def make_stamps(table_path, cutout_dir, output_dir):
     # Group galaxies by number of MIRI filters available
     miri_filters_per_count = defaultdict(list)
 
-    vis_dict ={}
+    #vis_dict ={}
     for row in table:
         gid = row['ID']
         filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
-        
-        vis_array = []
-        for filt in filters:
-            vis_file = f'{gid}_{filt}.h5'
-            vis_array.append(vis_file)
-        
-        # Add all the vis_data to the vis_dict for each galaxy ID
-        vis_dict[gid] = vis_array
         
         # Count MIRI filters available for this galaxy
         miri_available = [f for f in filters if f in MIRI_FILTERS]
         miri_count = len(miri_available)
         
         miri_filters_per_count[miri_count].append((gid, filters, miri_available))
-    
+        
     # Define default stretch parameters for different filters
     default_params = {
         'F444W': {'Q': 12, 'alpha': 0.08, 'weight': 1.6},  # Blue (strong boost)
@@ -340,7 +278,9 @@ def make_stamps(table_path, cutout_dir, output_dir):
                 elif miri_count >= 3:
                     # 3-4 MIRI filters: Only use MIRI filters
                     # Sort MIRI filters by wavelength
-                    sorted_miri = sorted(miri_available, key=lambda x: int(x[1:5]))
+                    import re
+                    sorted_miri = sorted(miri_available, key=lambda x: int(re.search(r'\d+', x).group()))
+
                     
                     if miri_count == 3:
                         # Use all 3 MIRI filters
@@ -378,7 +318,7 @@ def make_stamps(table_path, cutout_dir, output_dir):
 
                 # Create output filename
                 outfile = os.path.join(output_dir, f'{gid}_rgb.pdf')
-
+                
                 # Create RGB composite using simplified parameter passing
                 create_rgb_plot(
                     imagesRGB=imagesRGB,
@@ -468,17 +408,25 @@ def create_rgb_plot(imagesRGB, params, stretch, outfile):
         norm_images[colour] = np.nan_to_num(norm_images[colour], nan=0.0)
         norm_images[colour] = np.clip(norm_images[colour], 0, 1)
     
+    # --- Extract actual filter names from imagesRGB for labelling ---
+    def extract_filter_name(img_path):
+        # Defensive check if file path is valid and contains underscore
+        base = os.path.basename(img_path)
+        parts = base.split('_')
+        return parts[1] if len(parts) > 1 else "Unknown"
+    
     # --- Section to check whether all filters are available for RGB mapping ---
     if 'fake' in imagesRGB['G'][0]: # only R and B available
         # Create a horizontal panel with 2 grayscale subplots
         fig, axes = plt.subplots(1, 2, figsize=(12, 6)) # 2 images side-by-side
         
-        # Map colour channels to filters for labelling
-        channel_labels = {'R': 'F770W', 'B': 'F444W'}
+        # Use actual filter names from file paths
+        channel_labels = {
+            'R': extract_filter_name(imagesRGB['R'][0]),
+            'B': extract_filter_name(imagesRGB['B'][0])
+        }
         
-        # Legend info
-        legend_text = f"R: {os.path.basename(imagesRGB['R'][0]).split('_')[1]}\n" \
-                    f"B: {os.path.basename(imagesRGB['B'][0]).split('_')[1]}"
+        legend_text = f"R: {channel_labels['R']}\nB: {channel_labels['B']}"
         
         for ax, colour in zip(axes, ['B', 'R']):
             ax.imshow(norm_images[colour], cmap='gray', origin='lower')
@@ -488,13 +436,13 @@ def create_rgb_plot(imagesRGB, params, stretch, outfile):
         # Create a horizontal panel with 3 grayscale subplots
         fig, axes = plt.subplots(1, 3, figsize=(18, 6)) # 3 images side-by-side
         
-        # Map colour channels to filters for labelling
-        channel_labels = {'R': 'F1800W', 'G': 'F770W', 'B': 'F444W'}
+        # Use actual filter names from file paths
+        channel_labels = {
+            colour: extract_filter_name(imagesRGB[colour][0])
+            for colour in ['R', 'G', 'B']
+        }
         
-        # Legend info
-        legend_text = f"R: {os.path.basename(imagesRGB['R'][0]).split('_')[1]}\n" \
-                    f"G: {os.path.basename(imagesRGB['G'][0]).split('_')[1]}\n" \
-                    f"B: {os.path.basename(imagesRGB['B'][0]).split('_')[1]}"
+        legend_text = f"R: {channel_labels['R']}\nG: {channel_labels['G']}\nB: {channel_labels['B']}"
         
         for ax, colour in zip(axes, ['B', 'G', 'R']):
             ax.imshow(norm_images[colour], cmap='gray', origin='lower')

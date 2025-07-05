@@ -42,6 +42,7 @@ import warnings
 import json
 import matplotlib.pyplot as plt
 import astropy.units as u
+import matplotlib.colors as mcolors
 
 from PIL import Image
 from matplotlib.patches import Ellipse
@@ -168,7 +169,7 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='
         )
         ax.add_patch(ellipse)
         
-        ax.set_title(f"Galaxy {galaxy_id} - {filter} ({survey}{obs})")
+        ax.set_title(f"Galaxy {galaxy_id} - {filter}")
         ax.set_xlim(miri_x - 30, miri_x + 30)
         ax.set_ylim(miri_y - 30, miri_y + 30)
         ax.legend(loc='upper right')
@@ -484,6 +485,8 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
             filter = vis['filter']
             galaxy_id = vis['galaxy_id']
 
+            #if str(galaxy_id) == '13103':
+            
             aperture = EllipticalAperture(
                 positions=(aperture_params['x_center'], aperture_params['y_center']),
                 a=aperture_params['a'],
@@ -493,10 +496,10 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
 
             fig, axes = plt.subplots(1, 3, figsize=(12, 4))
 
-            im0 = plot_aperture_overlay(axes[0], image_data, aperture, label="Original Data with Aperture")
+            im0 = plot_aperture_overlay(axes[0], image_data, aperture)
             im1 = axes[1].imshow(background_plane, origin='lower', cmap='viridis')
-            axes[1].set_title("Global 2D Background Plane")
-            im2 = plot_aperture_overlay(axes[2], background_subtracted, aperture, label="Background-subtracted Data")
+            
+            im2 = plot_aperture_overlay(axes[2], background_subtracted, aperture)
 
             for ax, im, label in zip(axes, [im0, im1, im2], [
                 'Flux [MJy/(sr pixel)]',
@@ -507,7 +510,7 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
 
             fig.suptitle(f'{filter}', fontsize=18)
             plt.tight_layout()
-            plt.savefig(os.path.join(plane_sub_dir, f'{galaxy_id}_{filter}_planefit.png'), dpi=150)
+            plt.savefig(os.path.join(plane_sub_dir, f'{galaxy_id}_{filter}.png'), dpi=150)
             plt.close(fig)
 
     if mosaic_dir:
@@ -1182,15 +1185,23 @@ def create_fits_table_from_csv(csv_paths, output_file):
 
 
 
-def galaxy_statistics(table_path, fig_path=None, stats_path=None):
+def galaxy_statistics(table_path, fig_path=None, stats_path=None, detections=None, cols=4):
     """
     Analyse how many galaxies are observed in each filter, and which galaxy IDs appear per filter.
 
     Parameters:
     -----------
     table_path : str
-        Path to the FITS table
-
+        Path to the FITS table.
+    fig_path : str (optional)
+        Path to the output figure.
+    stats_path : str (optional)
+        Path to the output statistics file.
+    detections : dict (optional)
+        A dictionary mapping each filter to an array of galaxy IDs that are detected.
+    cols : int
+        The number of columns that should be displayed.
+    
     Returns:
     --------
     filter_id_map : dict
@@ -1208,7 +1219,8 @@ def galaxy_statistics(table_path, fig_path=None, stats_path=None):
         filters_str = row['Filters']
         filters = [f.strip() for f in filters_str.split(',') if f.strip()]
         for filt in filters:
-            filter_id_map[filt].add(gid)
+            if detections is None or gid in detections[filt]:
+                filter_id_map[filt].add(gid)
 
     # Print summary
     print("\nGalaxy Filter Mapping:")
@@ -1217,15 +1229,18 @@ def galaxy_statistics(table_path, fig_path=None, stats_path=None):
         print(f"{filt:10s}: {len(ids)} galaxies")
 
     if fig_path:
-        plot_galaxy_filter_matrix(table_path, fig_path)
+        if detections: title = 'MIRI Detections'
+        else: title = 'MIRI Coverage'
+        
+        plot_galaxy_filter_matrix(table_path, fig_path, None, detections, cols)
         print(f'Saved output plot to {fig_path}')
     if stats_path:
-        write_galaxy_stats(table, stats_path)
+        write_galaxy_stats(table, stats_path, detections)
         print(f'Wrote galaxy statistics to {stats_path}')
     
     return filter_id_map
 
-def write_galaxy_stats(table, output_path):
+def write_galaxy_stats(table, output_path, detections):
     with open(output_path, 'w') as f:
         f.write("Galaxy filter mapping summary:\n")
         f.write("="*40 + "\n")
@@ -1252,91 +1267,101 @@ def write_galaxy_stats(table, output_path):
             f.write(f"\nMapped in {n} filter(s): {len(filters_per_count[n])} galaxies\n")
             for gid, filt_list in filters_per_count[n]:
                 f.write(f"  {gid}: {', '.join(filt_list)}\n")
+        
+        # 3. Write detection statistics
+        f.write("\nGalaxy Detection Statistics:\n")
+        f.write("-" * 35 + "\n")
+
+        all_ids = set(str(row['ID']) for row in table)
+        total_galaxies = len(all_ids)
+        detected_in_any = set()
+
+        for filt, det_ids in detections.items():
+            # Convert to strings to match ID format
+            detected = set(str(i) for i in det_ids)
+            detected_in_any.update(detected)
+
+            f.write(f"{filt}: {len(detected)} / {total_galaxies} galaxies ({(len(detected) / total_galaxies) * 100:.1f}%) detected\n")
+
+        f.write(f"\nDetected in at least one filter: {len(detected_in_any)} / {total_galaxies} galaxies ({(len(detected_in_any) / total_galaxies) * 100:.1f}%)\n")
 
 
-def plot_galaxy_filter_matrix(table_path, fig_path):
+def plot_galaxy_filter_matrix(table_path, fig_path, title=None, detections=None, cols=4):
     """
-    Visualise which galaxies are observed in which filters using a binary matrix plot.
+    Visualise which galaxies are observed and detected in which filters using a binary matrix plot.
 
     Parameters:
     -----------
     table_path : str
         Path to the FITS file.
     fig_path : str
-        Path to the output file
+        Path to the output file.
+    title : str, optional
+        Title of the plot.
+    detections : dict, optional
+        Dictionary mapping filter names to lists of galaxy IDs that were detected in that filter.
     """
     table = Table.read(table_path, format='fits')
     
-    # Default order from blue to red for MIRI filters
     filter_order = ['F770W', 'F1000W', 'F1800W', 'F2100W']
-
-    # Custom pastel RGB colours from blue → red
     pastel_colours = {
-        'F770W': '#a6cee3',   # light pastel blue
-        'F1000W': '#b2df8a',  # soft green
-        'F1800W': '#fdbf6f',  # light orange
-        'F2100W': '#fb9a99'   # pastel red
+        'F770W': '#a6cee3',
+        'F1000W': '#b2df8a',
+        'F1800W': '#fdbf6f',
+        'F2100W': '#fb9a99'
     }
 
-    galaxy_ids = [str(gid) for gid in table['ID']]
+    galaxy_ids = [str(gid) for gid in table['ID']]    
     num_galaxies = len(galaxy_ids)
-    chunk_size = (num_galaxies + 3) // 4  # split into 4 roughly equal parts
+    chunk_size = (num_galaxies + 3) // cols
     chunks = [galaxy_ids[i:i + chunk_size] for i in range(0, num_galaxies, chunk_size)]
 
-    # Calculate size for square cells
-    cell_size = 0.5  # in inches per side
+    cell_size = 0.5
     num_cols = len(filter_order)
     num_rows = chunk_size
-    fig_width = cell_size * num_cols * 4  # 4 panels
-    fig_height = cell_size * num_rows * 0.65    # emiprical factor for approximate squares
+    fig_width = cell_size * num_cols * cols
+    fig_height = cell_size * num_rows * 0.65
     
-    fig, axes = plt.subplots(1, 4, figsize=(fig_width, fig_height), squeeze=False)
-    axes = axes[0]  # Unpack single row
-        
-    if len(chunks) == 1:
-        axes = [axes]  # ensure iterable
-
+    fig, axes = plt.subplots(1, cols, figsize=(fig_width, fig_height), squeeze=False)
+    axes = axes[0]
+    
     plot_number = 0
     for ax, g_ids in zip(axes, chunks):
         matrix = np.zeros((len(g_ids), len(filter_order)), dtype=int)
         g_index_map = {gid: i for i, gid in enumerate(g_ids)}
+        table_id_to_row = {str(row['ID']): idx for idx, row in enumerate(table)}
 
-        # Fill matrix
         for row in table:
             gid = str(row['ID'])
             if gid not in g_index_map:
                 continue
             g_idx = g_index_map[gid]
-            filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
+            filters = row['Filters']
+            if isinstance(filters, (list, np.ndarray)):
+                filters = [f.decode() if isinstance(f, bytes) else str(f) for f in filters]
+            else:
+                filters = [f.strip() for f in str(filters).split(',') if f.strip()]
             for filt in filters:
                 if filt in filter_order:
-                    f_idx = filter_order.index(filt)
-                    matrix[g_idx, f_idx] = 1
-        
-        table_id_to_row = {str(row['ID']): idx for idx, row in enumerate(table)}
+                    if detections is None or int(gid) in detections.get(filt, []):
+                        f_idx = filter_order.index(filt)
+                        matrix[g_idx, f_idx] = 1
 
-        # Draw coloured rectangles with artefact indication
         for i in range(matrix.shape[0]):
             for j in range(matrix.shape[1]):
                 if matrix[i, j] == 1:
                     base_colour = pastel_colours[filter_order[j]]
-                    # Check artefact flag for this galaxy and filter
-                    flag_art = False
-                    gid = g_ids[i]  # galaxy ID for this row in the matrix
-                    table_row_idx = table_id_to_row[str(gid)]
-                    row = table[table_row_idx]
+                    gid = g_ids[i]
+                    row = table[table_id_to_row[gid]]
 
-                    # Flag_Art is expected as list or array of bools per filter
                     flag_art_array = row['Flag_Art']
+                    flag_art = False
                     if flag_art_array is not None and len(flag_art_array) == len(filter_order):
                         flag_art = flag_art_array[j]
 
-                    # If artefact, adjust colour (e.g., darken by 30%)
                     if flag_art:
-                        # Simple darken: convert hex to RGB, darken, back to hex
-                        import matplotlib.colors as mcolors
                         rgb = np.array(mcolors.to_rgb(base_colour))
-                        darker_rgb = np.clip(rgb * 0.7, 0, 1)  # darken by 30%
+                        darker_rgb = np.clip(rgb * 0.7, 0, 1)
                         colour = darker_rgb
                     else:
                         colour = base_colour
@@ -1344,32 +1369,26 @@ def plot_galaxy_filter_matrix(table_path, fig_path):
                     ax.add_patch(
                         plt.Rectangle((j, i), 1, 1, color=colour)
                     )
-        
-        # Modify y-axis labels to add '*' for galaxies with a companion
+
+        # Add labels with companion asterisk if flagged
         y_labels = []
         for i, gid in enumerate(g_ids):
-            table_row_idx = table_id_to_row[str(gid)]
-            row = table[table_row_idx]
-            label = str(gid)
+            row = table[table_id_to_row[gid]]
+            label = gid
             if row['Flag_Com'] == True:
-                label += '*'  # Append asterisk if companion flag is True
+                label += '*'
             y_labels.append(label)
 
-        # Set y-axis tick labels with modified labels
-        ax.set_yticks(np.arange(len(g_ids)) + 0.5)  # Centre labels in each row
-        ax.set_yticklabels(y_labels, fontsize=8)
-
-        
         ax.set_xlim(0, len(filter_order))
         ax.set_ylim(len(g_ids), 0)
         ax.set_xticks(np.arange(len(filter_order)) + 0.5)
         ax.set_xticklabels(filter_order, rotation=45, ha='right')
         ax.set_yticks(np.arange(len(g_ids)) + 0.5)
         ax.set_yticklabels(y_labels, fontsize=8)
-        #if plot_number == 0: ax.set_ylabel("Galaxy ID", fontsize=12)
-        plot_number += 1
-        
+
+    plt.suptitle(title, fontsize=14)
     plt.tight_layout()
+    os.makedirs(os.path.dirname(fig_path), exist_ok=True)
     plt.savefig(fig_path, dpi=150)
     plt.show()
 
@@ -1702,4 +1721,5 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
         file.write(f"\nTotal sources analyzed: {len(common_ids)}\n")
         file.write("="*80 + "\n")
         
-        
+#def plot_masks(vis_file):
+    

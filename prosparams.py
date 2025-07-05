@@ -87,10 +87,10 @@ def build_obs(objid, zred, **extras):
                         }
 
     # MIRI
-    #filter_dict_miri = {
-    #                    'F770W':'jwst_f770w',
-    #                    'F1800W':'jwst_f1800w'
-    #                    }
+    filter_dict_miri = {
+                        'F770W':'jwst_f770w',
+                        'F1800W':'jwst_f1800w'
+                        }
 
     # list filters from the table that you want to use
     filter_code = list(filter_dict_3dhst.keys()) + list(filter_dict_nircam.keys()) #+ list(filter_dict_miri.keys())
@@ -189,7 +189,7 @@ def build_obs(objid, zred, **extras):
     # interpolate nirspec_wave vs. nirspec_sigma_v to get sigma_v for observed wavelength points.
     obs['sigma_v'] = func_nirspec(data_spec[1].data) # wavelength should be in micron  
     
-
+    
     ################################################
     #               Mask out regions               #
     ################################################
