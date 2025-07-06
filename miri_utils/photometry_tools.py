@@ -469,7 +469,7 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
     def plot_aperture_overlay(ax, data, aperture, cmap='magma', label='', percentile=(5, 95)):
         vmin, vmax = np.nanpercentile(data, percentile)
         im = ax.imshow(data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax)
-        aperture.plot(ax=ax, color='blue', lw=4)
+        #aperture.plot(ax=ax, color='blue', lw=4)
         ax.set_title(label)
         return im
     
@@ -485,33 +485,47 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
             filter = vis['filter']
             galaxy_id = vis['galaxy_id']
 
-            #if str(galaxy_id) == '13103':
-            
-            aperture = EllipticalAperture(
-                positions=(aperture_params['x_center'], aperture_params['y_center']),
-                a=aperture_params['a'],
-                b=aperture_params['b'],
-                theta=aperture_params['theta']
-            )
+            if str(galaxy_id) == '7922':
+                
+                aperture = EllipticalAperture(
+                    positions=(aperture_params['x_center'], aperture_params['y_center']),
+                    a=aperture_params['a'],
+                    b=aperture_params['b'],
+                    theta=aperture_params['theta']
+                )
 
-            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+                # Create figure with three subplots in a horizontal row
+                fig, axes = plt.subplots(1, 3, figsize=(23, 6))
 
-            im0 = plot_aperture_overlay(axes[0], image_data, aperture)
-            im1 = axes[1].imshow(background_plane, origin='lower', cmap='viridis')
-            
-            im2 = plot_aperture_overlay(axes[2], background_subtracted, aperture)
+                # Plot image1 (original data) on the first subplot
+                im0 = plot_aperture_overlay(axes[0], image_data, aperture, label='Original Data')
 
-            for ax, im, label in zip(axes, [im0, im1, im2], [
-                'Flux [MJy/(sr pixel)]',
-                'Background Flux [MJy/(sr pixel)]',
-                'Background-subtracted Flux [MJy/(sr pixel)]'
-            ]):
-                plt.colorbar(im, ax=ax, label=label)
+                # Plot image2 (background plane) on the second subplot
+                im1 = plot_aperture_overlay(axes[1], background_plane, aperture, label='Background Fit')
+                
+                # Plot image3 (background-subtracted) on the third subplot
+                im2 = plot_aperture_overlay(axes[2], background_subtracted, aperture, label='Background-Subtracted Data')
 
-            fig.suptitle(f'{filter}', fontsize=18)
-            plt.tight_layout()
-            plt.savefig(os.path.join(plane_sub_dir, f'{galaxy_id}_{filter}.png'), dpi=150)
-            plt.close(fig)
+                # Add a minus and equals sign between the images as an annotation
+                fig.text(0.32, 0.45, '$-$', fontsize=30, ha='center', va='center', rotation=0, color='black')
+                fig.text(0.66, 0.45, '$=$', fontsize=30, ha='center', va='center', rotation=0, color='black')
+
+                # Add colorbars
+                for ax, im, label in zip(axes, [im0, im1, im2], [
+                    'Flux [MJy/(sr pixel)]',
+                    'Background Flux [MJy/(sr pixel)]',
+                    'Background-subtracted Flux [MJy/(sr pixel)]'
+                ]):
+                    plt.colorbar(im, ax=ax)#, label=label)
+
+                plt.subplots_adjust(wspace=5)  # This will increase the space between the subplots
+                
+                # Tight layout and saving the figure
+                plt.tight_layout()
+                plt.subplots_adjust(top=0.85)  # Adjust to prevent overlap with annotation
+                #plt.suptitle(f'{filter} - Galaxy ID {galaxy_id}', fontsize=18)
+                plt.savefig(os.path.join(plane_sub_dir, f'{galaxy_id}_{filter}.png'), dpi=150)
+                plt.close(fig)
 
     if mosaic_dir:
         os.makedirs(mosaic_dir, exist_ok=True)
@@ -1415,7 +1429,6 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
     import numpy as np
     import matplotlib.pyplot as plt
     from astropy.table import Table
-    from matplotlib.patches import Rectangle
     import seaborn as sns
 
     # Set style for better plots
