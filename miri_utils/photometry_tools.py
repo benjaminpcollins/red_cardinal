@@ -1734,5 +1734,3 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
         file.write(f"\nTotal sources analyzed: {len(common_ids)}\n")
         file.write("="*80 + "\n")
         
-#def plot_masks(vis_file):
-    
