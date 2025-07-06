@@ -65,9 +65,9 @@ warnings.simplefilter("ignore", category=FITSFixedWarning)
 def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='masks', save_plot=False):
     
     # --- Load the FITS table ---
-    table_path =  '/home/bpc/University/master/Red_Cardinal/catalogues/Flux_Aperture_PSFMatched_AperCorr_old.fits'
+    table_path =  '/Users/benjamincollins/University/master/Red_Cardinal/catalogues/Flux_Aperture_PSFMatched_AperCorr_old.fits'
     aperture_table = Table.read(table_path)
-    #table_path =  '/home/bpc/University/master/Red_Cardinal/catalogues/aperture_table.csv'
+    #table_path =  '/Users/benjamincollins/University/master/Red_Cardinal/catalogues/aperture_table.csv'
     #df = pd.read_csv(table_path)
     
     # --- Select the galaxy by ID ---
@@ -80,20 +80,20 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='
     #row = df[df['ID'] == galaxy_id].iloc[0]
 
     # --- Read in rotation angle of MIRI FITS file ---
-    angle_file = '/home/bpc/University/master/Red_Cardinal/rotation_angles.json'
+    angle_file = '/Users/benjamincollins/University/master/Red_Cardinal/rotation_angles.json'
     with open(angle_file, "r") as f:
         angles = json.load(f)
     angle = angles[f"angle_{survey}{obs}"]
     
     # --- Read WCS from NIRCam image ---
-    nircam_path = f"/home/bpc/University/master/Red_Cardinal/NIRCam/F444W_cutouts/{galaxy_id}_F444W_cutout.fits"
+    nircam_path = f"/Users/benjamincollins/University/master/Red_Cardinal/NIRCam/F444W_cutouts/{galaxy_id}_F444W_cutout.fits"
     nircam_data, nircam_wcs = load_cutout(nircam_path)
 
     # --- Convert NIRCam pixel coordinates to sky ---
     sky_coord = nircam_wcs.pixel_to_world(row['Apr_Xcenter'], row['Apr_Ycenter'])
     
     # --- Open MIRI cutout image ---
-    miri_path = f"/home/bpc/University/master/Red_Cardinal/cutouts_phot/{galaxy_id}_{filter}_cutout_{survey}{obs}.fits"
+    miri_path = f"/Users/benjamincollins/University/master/Red_Cardinal/cutouts_phot/{galaxy_id}_{filter}_cutout_{survey}{obs}.fits"
     miri_data, miri_wcs = load_cutout(miri_path)
 
     # --- Convert sky coords to MIRI pixel coordinates ---
@@ -366,7 +366,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     }
     
     # Save visualisation data to .h5 file
-    vis_dir = '/home/bpc/University/master/Red_Cardinal/photometry/vis_data'
+    vis_dir = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/vis_data'
     os.makedirs(vis_dir, exist_ok=True)
     
     vis_path = os.path.join(vis_dir, f'{galaxy_id}_{filter_name}.h5')
@@ -659,7 +659,7 @@ def visualise_background(vis_data, fig_path=None):
         plt.savefig(filepath, dpi=150)
         plt.close(fig)
 
-def get_psf(filter_name, psf_dir='/home/bpc/University/master/Red_Cardinal/WebbPSF/'):
+def get_psf(filter_name, psf_dir='/Users/benjamincollins/University/master/Red_Cardinal/WebbPSF/'):
     """
     Read MIRI PSF file for the specified filter.
     
@@ -747,8 +747,8 @@ def calculate_aperture_correction(psf_data, aperture_params):
     # Calculate flux in aperture using exact method
     phot_table = aperture_photometry(psf_data, aperture, method='exact')
     flux_in_aperture = phot_table['aperture_sum'][0]
-    
-    return total_flux / flux_in_aperture
+    correction_factor = total_flux / flux_in_aperture
+    return correction_factor
 
 def measure_flux(image_data, error_map, background_median, background_std, background_plane, aperture_params):
     """
@@ -822,7 +822,7 @@ def measure_flux(image_data, error_map, background_median, background_std, backg
         'flux': flux * conversion_factor,
         'flux_error': total_flux_error * conversion_factor,
         'background_flux': background_flux * conversion_factor,
-        'median_error': median_error * conversion_factor,
+        'image_error': sum_image_errors * conversion_factor,
         'pixel_count': aperture.area
     }
 
@@ -987,7 +987,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, suffix='',
         corrected_flux_error = flux_measurements['flux_error'] * correction_factor
         corrected_background_flux = flux_measurements['background_flux'] * correction_factor
         corrected_background_error = background_std * correction_factor
-        corrected_median_error = flux_measurements['median_error'] * correction_factor
+        corrected_image_error = flux_measurements['image_error'] * correction_factor
         
         # --- Convert fluxes into AB magnitudes ---
         if corrected_flux > 0:
@@ -1000,7 +1000,7 @@ def perform_photometry(cutout_files, aperture_table, output_folder, suffix='',
             'ID': int(galaxy_id),
             'Flux': corrected_flux,
             'Flux_Err': corrected_flux_error,
-            'Image_Err': corrected_median_error,
+            'Image_Err': corrected_image_error,
             'Flux_BKG': corrected_background_flux,
             'Flux_BKG_Err': corrected_background_error,
             'AB_Mag': ab_mag,
@@ -1188,7 +1188,7 @@ def create_fits_table_from_csv(csv_paths, output_file):
     print("="*50)
     print(table.info())
 
-    phot_tables_dir = '/home/bpc/University/master/Red_Cardinal/photometry/phot_tables/'
+    phot_tables_dir = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/phot_tables/'
     os.makedirs(phot_tables_dir, exist_ok=True)
     fits_output = os.path.join(phot_tables_dir, output_file)
     table.write(fits_output, format='fits', overwrite=True)
@@ -1436,8 +1436,8 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
     sns.set_palette("husl")
 
     # Load the two tables
-    table_small_path = '/home/bpc/University/master/Red_Cardinal/photometry/results/Flux_SmallAperture_NoCorr_MIRI.fits'
-    table_big_path = '/home/bpc/University/master/Red_Cardinal/photometry/results/Flux_BigAperture_NoCorr_MIRI.fits'
+    table_small_path = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/results/Flux_SmallAperture_NoCorr_MIRI.fits'
+    table_big_path = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/results/Flux_BigAperture_NoCorr_MIRI.fits'
 
     table_small = Table.read(table_small_path)
     table_big = Table.read(table_big_path)
