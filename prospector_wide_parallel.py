@@ -142,7 +142,7 @@ def process_galaxy(output):
                     add_agn=results['run_params']['add_agn'],
                     fit_afe=results['run_params']['fit_afe'])
     
-    model.params['polyorder'] = 25
+    model.params['polyorder'] = 10
     # now we have to exclude the last 3 parameters from the fit
     map_parameters = get_MAP(results)
     map_parameters = map_parameters[:-3]

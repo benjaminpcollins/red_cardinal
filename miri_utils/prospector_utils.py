@@ -1,15 +1,19 @@
 import os
+import random
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
-from astropy import table
 import astropy.units as u
 import astropy.constants as const
 from sedpy.observate import load_filters, list_available_filters
 import fsps
 import traceback
+import pickle as pkl
+from concurrent.futures import ProcessPoolExecutor
+import h5py
 
+from astropy.table import Table
 import prospect.io.read_results as reader
 from prospect.sources import FastStepBasis
 from prospect.models import priors
@@ -20,7 +24,8 @@ from prospect.models.sedmodel import PolySpecModel
 from prospect.utils.obsutils import fix_obs
 from collections import defaultdict
 
-
+from scipy.signal import medfilt
+from scipy import interpolate
 
 
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
@@ -60,7 +65,7 @@ def get_MAP(results, verbose=False):
 
     return map_parameters
 
-def build_obs(objid):
+def build_obs(objid, obs):
     """Build observation dictionary with photometry (no spectroscopy)"""
     
     # Load photometry data
@@ -73,6 +78,11 @@ def build_obs(objid):
     if ph_miri is None or len(ph_miri) == 0:
         print(f"No MIRI data found for object {objid}. Using only HST+NIRCam data.")
         return None
+    
+    #print("obs from results: ", obs.keys())
+    
+    obs_file = f'/Users/benjamincollins/University/master/Red_Cardinal/prospector/obs/obs_{objid}.npy'
+    obs = np.load(obs_file, allow_pickle=True).item()
     
     # Filter dictionaries
     filter_dict_3dhst = {
@@ -110,8 +120,8 @@ def build_obs(objid):
     filter_code_all = filter_code_orig + list(filter_dict_miri.keys())
     filter_name_all = filter_name_orig + list(filter_dict_miri.values())
     
-    # Create obs dictionary
-    obs = {}
+    #obs = {}
+    # Modify existing obs dictionary
     obs['filters'] = load_filters(filter_name_orig)  # Original filters for model
     obs['filters_all'] = load_filters(filter_name_all)  # All filters for plotting
     obs['filter_code'] = filter_code_orig
@@ -164,6 +174,10 @@ def build_obs(objid):
     
     # ensure all required keys are present in the obs dictionary
     obs = fix_obs(obs)
+    #obs['spectrum'] = old_obs['spectrum']  # Use the original spectrum
+    #obs['wavelength'] = old_obs['wavelength']  # Use the original wavelength
+    #obs['unc'] = old_obs['unc']  # Use the original uncertainties
+    print(obs.keys())
     
     return obs
 
@@ -293,27 +307,8 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     #agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.95*tuniv*1000), 13), tuniv*1000 )
     agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
     agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
-    print(agelims)
     agebins = np.array([agelims[:-1], agelims[1:]]).T
     nbins = len(agelims) - 1
-
-    """
-    # Verification (optional - can remove in production)
-    linear_bins = 10**agebins
-    min_spacing_check = np.min(np.diff(linear_bins, axis=1))
-    if min_spacing_check < 1e6:
-        print(f"Warning: Minimum spacing {min_spacing_check/1e6:.2f} Myr still below 1 Myr at z={zred:.2f}")
-
-    print(f"{'Bin':>3} | {'Start':>12} → {'End':>12} [yr] | Width: [Δt] [yr]")
-    print("-" * 55)
-
-    for i, (logt0, logt1) in enumerate(agebins):
-        t0 = 10**logt0
-        t1 = 10**logt1
-        width = t1 - t0
-        print(f"{i:>3} | {t0:12.3e} → {t1:12.3e} | Δt = {width: .3e}")
-    """
-    
     
     # This is the *total*  mass formed, as a variable
     model_params["logmass"] = {"N": 1, "isfree": True, 
@@ -437,14 +432,56 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     return model
 
 
+def mask_obs(obs, zred):
+    # mask emission lines in the wavelength range
+
+    # import lines to mask
+    emi_wavelengths = [3723, 3726, 3729, 3835, 3889, 3970,  
+                            4102.89, 4341.69, 4364, 4472, 
+                            4621, 4720, 4960.30, 5008.24, 
+                            6549.86, 6585.27]
+
+    # mask emission lines
+    mask = obs['mask']
+    for w_emi in emi_wavelengths:
+        linemask = abs((obs['wavelength']/(1+zred) - w_emi)/w_emi) < 800/3e5
+        mask = np.logical_and(mask,~linemask)
+
+    # mask bad pixels
+    normed_spec = obs['spectrum'][mask]
+    kernel = 201
+    f_cont_masked = medfilt(normed_spec, kernel)
+    f_cont_intepolator = interpolate.interp1d(obs['wavelength'][mask], f_cont_masked, kind='linear', fill_value='extrapolate')
+    f_cont = f_cont_intepolator(obs['wavelength'])
+
+    # residuals
+    std = np.std(obs['spectrum']-f_cont)
+    sigma5_lvl =  np.zeros((len(obs['spectrum']),)) + 5*std
+    mask2 = np.full_like(obs['mask'],True)
+    for k in range(len(obs['wavelength'])):
+        if (obs['mask'][k]) & (np.abs((obs['spectrum']-f_cont)[k]) > sigma5_lvl[k]):
+            for j in range(k-2,k+3):
+                if j < len(obs['wavelength']):
+                    mask2[j] = False
+
+    mask = np.logical_and(mask2, mask)
+
+    return mask
+
 
 
 def plot_reconstruction_with_miri(objid, output_dir=None):
     """Main function to reconstruct and plot PROSPECTOR results with MIRI data"""
     
     # Load the h5 file for the given objid
-    h5_file = glob.glob(os.path.join(dirout, f"output_{objid}*.h5"))[0] 
+    h5_file = glob.glob(os.path.join(dirout, f"output_{objid}*.h5"))
     
+    try:
+        h5_file = h5_file[0]
+    except IndexError:
+        print(f"No PROSPECTOR results found for objid {objid}.")
+        return None, None, None
+
     # Load PROSPECTOR results
     full_path = os.path.join(dirout, h5_file)
     results, _, _ = reader.results_from(full_path)
@@ -454,42 +491,85 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
     print(f"GALAXY {objid}:  z = {zred}")
 
     # Build new observations including MIRI
-    obs = build_obs(objid)
+    obs = build_obs(objid, results['obs'])
+    #print(obs.keys())
+    
+    # IMPORTANT! mask emission lines and bad pixels
+    obs['mask'] = mask_obs(obs, zred)
+    
+    #obs = results['obs']
+    #print(obs.keys())
     
     # Build model matching original setup
-    
     model = build_model(objid, zred, add_duste=results['run_params']['add_duste'],
                     add_neb=False,  # Set add_neb to False
                     add_agn=results['run_params']['add_agn'],
                     fit_afe=results['run_params']['fit_afe'])
     
-    model.params['polyorder'] = 25
-    
+    model.params['polyorder'] = 10
+        
     # Now we have to exclude the last 3 parameters from the fit
     map_parameters = get_MAP(results)
     map_parameters = map_parameters[:-3]
     
+    
+    #print("\nMAP parameters:", map_parameters)
+    
+    #params_file = '/Users/benjamincollins/University/master/Red_Cardinal/prospector/params/params_MAP_12717.pkl'
+    #params_dict = pkl.load(open(params_file, 'rb'))
+    
+    # Ensure this gives you the correct order expected by the model
+    #param_order = model.theta_labels()
+    #print(model.theta_labels())
+    
+    # Extract the values from the dictionary in this order
+    #theta_map = [params_dict[key] for key in param_order]
+
+    #print("\nMAP parameters loaded from file:", theta_map)
+    
+    #zred_used = map_parameters['zred']
+    #print("\nRedshift used for prediction:", zred_used)
+
     # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
     sps = FastStepBasis(zcontinuous=1)
-            
+        
     spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
+    
+    calib_vector = model._speccal
+
+    #get the spectral jitter  for the errors
+    #spec_jitter = map_parameters[5]
+    #errs = obs['unc']*spec_jitter/calib_vector * 3631 # observational errors
     
     fig, ax = plt.subplots(figsize=(10, 6))
     
-    # Constants
-    c = const.c.to(u.AA/u.s).value  # Speed of light in AA/s
     factor = 3631e6 # maggies to µJy conversion factor
-
-    spec *= factor    # convert to µJy
+    
+    spec = (spec/calib_vector) * factor    # convert to µJy
+    
+    wavelengths = obs['wavelength'] * 1e-4  # convert to µm
+    spectrum  = (obs['spectrum']/calib_vector) * factor
+    
     # Redshifted model spectrum
-    wave_spec = sps.wavelengths * (1 + zred) * 1e-4  # now in observer-frame [µm]
+    wave_spec = sps.wavelengths * 1e-4 * (1 + zred)   # convert to µm, redshifted
+    
+    # 3. Generate the model spectrum at full resolution (rest-frame)
+    spec_rest, mass = sps.get_spectrum(tage=map_parameters[0], peraa=True)
+    wave_rest = sps.wavelengths * 1e-4  # Å to µm
+    wave_obs = wave_rest * (1 + zred)
 
+    # 5. Apply calibration, units, etc.
+    calib = model._speccal
+    spec_calib = spec_rest / calib * 3631e6  # to µJy
+    
+    print(len(wave_spec), len(spec))
+    
     # Define the style per instrument
     instrument_styles = {
-        'acs':     {'color': 'royalblue',   'marker': 'o', 'edgecolor': 'black', 'label': 'HST ACS'},
-        'wfc3':    {'color': 'limegreen',  'marker': 'o', 'edgecolor': 'black', 'label': 'HST WFC3'},
-        'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST NIRCam'},
-        'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST MIRI'}
+        'acs':     {'color': 'royalblue',   'marker': 'o', 'edgecolor': 'black', 'label': 'HST ACS', 'ms': 10},
+        'wfc3':    {'color': 'limegreen',  'marker': 'o', 'edgecolor': 'black', 'label': 'HST WFC3', 'ms': 10},
+        'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST NIRCam', 'ms': 10},
+        'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST MIRI', 'ms': 10}
     }
 
     """
@@ -538,43 +618,52 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
             color=style['color'],
             markeredgecolor=style.get('edgecolor', 'none'),
             alpha=style.get('alpha', 1.0),
-            markersize=8,
+            markersize=10,
             label=style['label'] if style['label'] not in ax.get_legend_handles_labels()[1] else None
         )
 
 
+    
+    #print(len(wavelengths), len(spectrum))
 
     # Model photometry (used in fit)
-    #ax1.plot(wave_model, phot, 'k*', markersize=9, label='Model prediction')
+    wave_model = np.array([filt.wave_effective for filt in obs['filters']]) * 1e-4  # µm
+    phot *= factor  # µJy
+    ax.plot(wave_model, phot, 'd', markersize=6, color='black', label='Model photometry')
 
+    # Observed spectrum
+    ax.plot(wavelengths, spectrum, label="Observed Spectrum",color='black',alpha=0.3)
+    
     # Full SED
-    ax.plot(wave_spec, spec, '-', color='crimson', alpha=0.6, lw=1.5, label='Best-fit model')
+    ax.plot(wave_obs, spec_calib, '-', color='crimson', alpha=0.6, lw=1.5, label='Best-fit model')
+
     """
-    import random
-
     # Number of posterior samples to use
-    nsample = 10
+    nsample = 200
     samples = random.sample(range(results['chain'].shape[0]), nsample)
-
+    
     # Store predicted spectra
     specs = []
-
+    chain = np.asarray(results['chain'])    # Read as array for easier indexing
+    
     for i in samples:
-        theta = results['chain'][i]
-        spec_i, _, _ = model.predict(theta, obs=obs, sps=sps)
+        theta = chain[i]
+        spec_i, _, _ = model.predict(theta[:-3], obs=obs, sps=sps)
         specs.append(spec_i)
 
-    
     # Convert to array: shape (nsample, nwave)
     specs = np.array(specs)
 
     # Compute 16th and 84th percentile envelope
     spec_lo = np.percentile(specs, 16, axis=0)
     spec_hi = np.percentile(specs, 84, axis=0)
+    
+    spec_lo *= factor  # Convert to µJy
+    spec_hi *= factor  # Convert to µJy
     spec_med = np.percentile(specs, 50, axis=0)  # Optional: median spectrum
     
-    ax1.plot(model.wavelengths, spec_med, label='Median Spectrum', color='green')
-    ax1.fill_between(model.wavelengths, spec_lo, spec_hi, color='green', alpha=0.3, label='1σ range')
+    ax.fill_between(wave_spec, spec_lo, spec_hi, 
+                    color='firebrick', alpha=0.1, label='1σ range')
     """
     
     # Compute bounds
@@ -597,10 +686,26 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
     ax.set_yscale('log')
     ax.legend()
     
+    output_dir = '/Users/benjamincollins/University/Master/Red_Cardinal/prospector/fits_plus_miri/'
+    
     plt.tight_layout()
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        plt.savefig(os.path.join(output_dir, f'{objid}_miri_overlay.png'))
+        fname = os.path.join(output_dir, f'{objid}_miri_overlay_v3.png')
+        plt.savefig(fname)
+        print(f"Saved plot to {fname}")
     plt.show()
+    plt.close()
     
     return obs, model, results
+
+table_path = '/Users/benjamincollins/University/Master/Red_Cardinal/photometry/phot_tables/Photometry_Table_MIRI_v6.fits'
+
+table = Table.read(table_path, format='fits')
+galaxy_ids = [str(gid) for gid in table['ID']]    
+
+
+#if __name__ == "__main__":
+#    max_workers = min(6, os.cpu_count())
+#    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+#        executor.map(plot_reconstruction_with_miri, galaxy_ids)
