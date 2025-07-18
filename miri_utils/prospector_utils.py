@@ -49,8 +49,9 @@ def get_zred(objid):
                           dtype=[('galid', int),('zred', '<f8')])
     return abs(dat_zred['zred'][dat_zred['galid'] == objid][0])
 
-def get_MAP(results, verbose=False):
-    """Get Maximum A Posteriori parameters"""
+def get_MAP(res, verbose=False):
+    """
+    Get Maximum A Posteriori parameters
     chains = results['chain']   # Shape: (n_samples, n_parameters)
     log_probabilities = results['lnprobability']  # Shape: (n_samples,)
     
@@ -64,6 +65,17 @@ def get_MAP(results, verbose=False):
         print("MAP Parameters:", map_parameters)
 
     return map_parameters
+    """
+    #Get the posterior sample with the highest posterior probability.
+    
+    imax = np.argmax(res['lnprobability'])
+    # there must be a more elegant way to deal with differnt shapes
+    try:
+        i, j = np.unravel_index(imax, res['lnprobability'].shape)
+        theta_best = res['chain'][i, j, :].copy()
+    except(ValueError):
+        theta_best = res['chain'][imax, :].copy()
+    return theta_best
 
 def build_obs(objid, obs):
     """Build observation dictionary with photometry (no spectroscopy)"""
@@ -78,11 +90,6 @@ def build_obs(objid, obs):
     if ph_miri is None or len(ph_miri) == 0:
         print(f"No MIRI data found for object {objid}. Using only HST+NIRCam data.")
         return None
-    
-    #print("obs from results: ", obs.keys())
-    
-    obs_file = f'/Users/benjamincollins/University/master/Red_Cardinal/prospector/obs/obs_{objid}.npy'
-    obs = np.load(obs_file, allow_pickle=True).item()
     
     # Filter dictionaries
     filter_dict_3dhst = {
@@ -120,8 +127,9 @@ def build_obs(objid, obs):
     filter_code_all = filter_code_orig + list(filter_dict_miri.keys())
     filter_name_all = filter_name_orig + list(filter_dict_miri.values())
     
-    #obs = {}
+    
     # Modify existing obs dictionary
+    obs = {}
     obs['filters'] = load_filters(filter_name_orig)  # Original filters for model
     obs['filters_all'] = load_filters(filter_name_all)  # All filters for plotting
     obs['filter_code'] = filter_code_orig
@@ -177,7 +185,7 @@ def build_obs(objid, obs):
     #obs['spectrum'] = old_obs['spectrum']  # Use the original spectrum
     #obs['wavelength'] = old_obs['wavelength']  # Use the original wavelength
     #obs['unc'] = old_obs['unc']  # Use the original uncertainties
-    print(obs.keys())
+    #print(obs.keys())
     
     return obs
 
@@ -484,18 +492,18 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
 
     # Load PROSPECTOR results
     full_path = os.path.join(dirout, h5_file)
-    results, _, _ = reader.results_from(full_path)
+    results, obs, model = reader.results_from(full_path)
     
+    #print("obs: ", obs)
     # Get redshift and MAP parameters
     zred = get_zred(objid)
     print(f"GALAXY {objid}:  z = {zred}")
 
     # Build new observations including MIRI
-    obs = build_obs(objid, results['obs'])
-    #print(obs.keys())
+    #obs = build_obs(objid, results['obs'])
     
     # IMPORTANT! mask emission lines and bad pixels
-    obs['mask'] = mask_obs(obs, zred)
+    #obs['mask'] = mask_obs(obs, zred)
     
     #obs = results['obs']
     #print(obs.keys())
@@ -513,7 +521,9 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
     map_parameters = map_parameters[:-3]
     
     
-    #print("\nMAP parameters:", map_parameters)
+    for a, b in zip(model.theta_labels(), map_parameters):
+        print(f"{a}: {b}")
+    
     
     #params_file = '/Users/benjamincollins/University/master/Red_Cardinal/prospector/params/params_MAP_12717.pkl'
     #params_dict = pkl.load(open(params_file, 'rb'))
@@ -545,24 +555,10 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
     
     factor = 3631e6 # maggies to µJy conversion factor
     
-    spec = (spec/calib_vector) * factor    # convert to µJy
-    
-    wavelengths = obs['wavelength'] * 1e-4  # convert to µm
-    spectrum  = (obs['spectrum']/calib_vector) * factor
+    spec = spec/calib_vector * factor    # convert to µJy
     
     # Redshifted model spectrum
     wave_spec = sps.wavelengths * 1e-4 * (1 + zred)   # convert to µm, redshifted
-    
-    # 3. Generate the model spectrum at full resolution (rest-frame)
-    spec_rest, mass = sps.get_spectrum(tage=map_parameters[0], peraa=True)
-    wave_rest = sps.wavelengths * 1e-4  # Å to µm
-    wave_obs = wave_rest * (1 + zred)
-
-    # 5. Apply calibration, units, etc.
-    calib = model._speccal
-    spec_calib = spec_rest / calib * 3631e6  # to µJy
-    
-    print(len(wave_spec), len(spec))
     
     # Define the style per instrument
     instrument_styles = {
@@ -594,7 +590,7 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
     """
 
     # Loop through each filter and plot
-    for i, filt in enumerate(obs['filters_all']):
+    for i, filt in enumerate(obs['filters']):
         name = filt.name.lower()
 
         if 'acs' in name:
@@ -608,9 +604,9 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
         else:
             continue  # skip unknown filters
 
-        wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
-        flux = obs['maggies_all'][i] * factor  # µJy
-        err  = obs['maggies_unc_all'][i] * factor  # µJy
+        wave = obs['phot_wave'][i] * 1e-4  # convert to µm
+        flux = obs['maggies'][i] * factor  # µJy
+        err  = obs['maggies_unc'][i] * factor  # µJy
 
         ax.errorbar(
             wave, flux, yerr=err,
@@ -622,20 +618,32 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
             label=style['label'] if style['label'] not in ax.get_legend_handles_labels()[1] else None
         )
 
-
-    
-    #print(len(wavelengths), len(spectrum))
-
     # Model photometry (used in fit)
     wave_model = np.array([filt.wave_effective for filt in obs['filters']]) * 1e-4  # µm
     phot *= factor  # µJy
     ax.plot(wave_model, phot, 'd', markersize=6, color='black', label='Model photometry')
-
+    
+    
     # Observed spectrum
-    ax.plot(wavelengths, spectrum, label="Observed Spectrum",color='black',alpha=0.3)
+    #obs_file = f'/Users/benjamincollins/University/master/Red_Cardinal/prospector/obs/obs_{objid}.npy'
+    #loaded_obs = np.load(obs_file, allow_pickle=True).item()
+    
+    loaded_obs = obs
+
+    spec_new, _, _ = model.predict(map_parameters, obs=loaded_obs, sps=sps)
+    spec_new = spec
+    
+    calib_vector = model.spec_calibration(obs=loaded_obs, spec=spec_new)
+    mask = loaded_obs['mask']
+    print("Calibration vector:", calib_vector)
+    
+    wavelengths = loaded_obs['wavelength'][mask] * 1e-4  # convert to µm
+    spectrum  = loaded_obs['spectrum'][mask] / calib_vector[mask]
+    
+    ax.plot(wavelengths, spectrum, label="Observed Spectrum", color='royalblue', alpha=0.7)
     
     # Full SED
-    ax.plot(wave_obs, spec_calib, '-', color='crimson', alpha=0.6, lw=1.5, label='Best-fit model')
+    ax.plot(obs['wavelength']*1e-4, spec, '-', color='crimson', alpha=0.6, lw=1.5, label='Best-fit model')
 
     """
     # Number of posterior samples to use
@@ -709,3 +717,9 @@ galaxy_ids = [str(gid) for gid in table['ID']]
 #    max_workers = min(6, os.cpu_count())
 #    with ProcessPoolExecutor(max_workers=max_workers) as executor:
 #        executor.map(plot_reconstruction_with_miri, galaxy_ids)
+
+
+# To Do:
+# - Multiply observed spectrum by the mask
+# - Add spectrum after prediction
+# - 
