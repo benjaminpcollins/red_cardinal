@@ -8,6 +8,7 @@ import astropy.units as u
 import astropy.constants as const
 from sedpy.observate import load_filters, list_available_filters
 import fsps
+
 import traceback
 import pickle as pkl
 from concurrent.futures import ProcessPoolExecutor
@@ -22,10 +23,13 @@ from prospect.models import transforms
 from astropy.cosmology import WMAP9 as cosmo
 from prospect.models.sedmodel import PolySpecModel
 from prospect.utils.obsutils import fix_obs
+from prospect.utils.plotting import posterior_samples
+
 from collections import defaultdict
 
 from scipy.signal import medfilt
 from scipy import interpolate
+
 
 
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
@@ -77,7 +81,9 @@ def get_MAP(res, verbose=False):
         theta_best = res['chain'][imax, :].copy()
     return theta_best
 
-def build_obs(objid, obs):
+
+
+def build_obs(objid, obs=None, wave_full=None):
     """Build observation dictionary with photometry (no spectroscopy)"""
     
     # Load photometry data
@@ -127,9 +133,9 @@ def build_obs(objid, obs):
     filter_code_all = filter_code_orig + list(filter_dict_miri.keys())
     filter_name_all = filter_name_orig + list(filter_dict_miri.values())
     
+    # Modify obs dictionary
+    if not obs: obs = {}
     
-    # Modify existing obs dictionary
-    obs = {}
     obs['filters'] = load_filters(filter_name_orig)  # Original filters for model
     obs['filters_all'] = load_filters(filter_name_all)  # All filters for plotting
     obs['filter_code'] = filter_code_orig
@@ -182,10 +188,28 @@ def build_obs(objid, obs):
     
     # ensure all required keys are present in the obs dictionary
     obs = fix_obs(obs)
-    #obs['spectrum'] = old_obs['spectrum']  # Use the original spectrum
-    #obs['wavelength'] = old_obs['wavelength']  # Use the original wavelength
-    #obs['unc'] = old_obs['unc']  # Use the original uncertainties
-    #print(obs.keys())
+    
+    flux_obs = obs['spectrum']
+    wave_obs = obs['wavelength']
+    unc_obs = obs['unc']
+    
+    # Create mask for where you have actual data
+    mask = (wave_full >= wave_obs.min()) & (wave_full <= wave_obs.max())
+    
+    # Interpolate observed data onto the full wavelength grid (only where mask is True)
+    flux_interp = np.interp(wave_full[mask], wave_obs, flux_obs)
+    unc_interp = np.interp(wave_full[mask], wave_obs, unc_obs)
+    
+    # Extend the observed quantities
+    obs['spectrum'] = np.full_like(wave_full, 0.0)
+    obs['wavelength'] = wave_full
+    obs['unc'] = np.full_like(wave_full, 1e20)
+    obs['mask'] = np.zeros_like(wave_full, dtype=bool)  # Start with all False
+    
+    # Assign observed spectrum and uncertainties to the observed wavelength range
+    obs['spectrum'][mask] = flux_interp
+    obs['unc'][mask] = unc_interp
+    obs['mask'][mask] = True
     
     return obs
 
@@ -246,18 +270,18 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     model_params['zred'] = {"N": 1, "isfree": True, 
                             "init": zred, 
                             "units": "redshift",
-                           "prior": priors.Normal(mean=zred, sigma=0.005)}
+                            "prior": priors.Normal(mean=zred, sigma=0.005)}
     
     model_params['logzsol'] = {"N": 1, "isfree": True, 
                                "init": -0.5, 
-                              "units": r"$\log (Z/Z_\odot)$",
-                              "prior": priors.TopHat(mini=-2, maxi=0.50)}
+                               "units": r"$\log (Z/Z_\odot)$",
+                               "prior": priors.TopHat(mini=-2, maxi=0.50)}
     
     if fit_afe:
         model_params['afe'] = {"N": 1, "isfree": True, 
                                "init": 0.0,
-                              "units": r"$[\alpha/fe]$",
-                              "prior": priors.TopHat(mini=-0.2, maxi=0.6)}
+                               "units": r"$[\alpha/fe]$",
+                               "prior": priors.TopHat(mini=-0.2, maxi=0.6)}
     else:
         model_params['afe'] = {"N": 1, "isfree": False,
                                "init": 0.0,
@@ -285,8 +309,8 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
                                       "prior": priors.TopHat(mini=1e-5, maxi=0.2)}
     
     model_params['nsigma_outlier_spec'] = {"N": 1,
-                                          "isfree": False,
-                                          "init": 50.0}
+                                           "isfree": False,
+                                           "init": 50.0}
     
     model_params['f_outlier_phot'] = {"N": 1,
                                       "isfree": True,
@@ -294,8 +318,8 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
                                       "prior": priors.TopHat(mini=0, maxi=0.5)}
     
     model_params['nsigma_outlier_phot'] = {"N": 1,
-                                          "isfree": False,
-                                          "init": 50.0}
+                                           "isfree": False,
+                                           "init": 50.0}
     
     
     # This is a multiplicative noise inflation term. It inflates the noise in
@@ -339,9 +363,9 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     
     # This controls the distribution of SFR(t) / SFR(t+dt). It has nbins-1 components.
     model_params["logsfr_ratios"] = {'N': nbins-1, 'isfree': True,
-                                    'init': np.full(nbins-1, 0.0),  # constant SFH
-                                    'units': '',
-                                    'prior': priors.StudentT(mean=np.full(nbins-1, 0.0),
+                                     'init': np.full(nbins-1, 0.0),  # constant SFH
+                                     'units': '',
+                                     'prior': priors.StudentT(mean=np.full(nbins-1, 0.0),
                                                            scale=np.full(nbins-1, 0.3), 
                                                            df=np.full(nbins-1, 2))}
     
@@ -350,9 +374,9 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     # ------------------------------
 
     model_params['imf_type'] = {'N': 1, 'isfree': False,
-                             'init': 1, #1 = chabrier
-                             'units': "FSPS index",
-                             'prior': None}
+                                'init': 1, #1 = chabrier
+                                'units': "FSPS index",
+                                'prior': None}
 
 
     # ----------------------------
@@ -369,9 +393,9 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
                              "prior": priors.TopHat(mini=0.0, maxi=4.0/1.086)}
     
     model_params["dust_index"] = {"N": 1,
-                                 "isfree": True,
-                                 "init": 0.0, "units": "power-law multiplication of Calzetti",
-                                 "prior": priors.ClippedNormal(mini=-1.5, maxi=0.4, mean=0.0, sigma=0.3)}
+                                  "isfree": True,
+                                  "init": 0.0, "units": "power-law multiplication of Calzetti",
+                                  "prior": priors.ClippedNormal(mini=-1.5, maxi=0.4, mean=0.0, sigma=0.3)}
 
     model_params['dust1'] = {"N": 1,
                              "isfree": False,
@@ -426,9 +450,9 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
         model_params['use_eline_prior'] = {'N': 1, 'is_free': False, 'init': False}
         
         model_params['eline_sigma'] = {"N": 1,
-                                    "isfree": True,
-                                    "init": 100.0,
-                                    "prior": priors.TopHat(mini=30, maxi=400)}
+                                       "isfree": True,
+                                       "init": 100.0,
+                                       "prior": priors.TopHat(mini=30, maxi=400)}
         
         
     # ----------------------------
@@ -492,22 +516,23 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
 
     # Load PROSPECTOR results
     full_path = os.path.join(dirout, h5_file)
-    results, obs, model = reader.results_from(full_path)
-    
-    #print("obs: ", obs)
-    # Get redshift and MAP parameters
-    zred = get_zred(objid)
-    print(f"GALAXY {objid}:  z = {zred}")
+    results, loaded_obs, model = reader.results_from(full_path)
 
+    # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
+    sps = FastStepBasis(zcontinuous=1)
+    wave_full = sps.wavelengths
+    
     # Build new observations including MIRI
-    #obs = build_obs(objid, results['obs'])
+    obs = build_obs(objid, loaded_obs, wave_full)
     
-    # IMPORTANT! mask emission lines and bad pixels
-    #obs['mask'] = mask_obs(obs, zred)
-    
-    #obs = results['obs']
-    #print(obs.keys())
-    
+    # Now we have to exclude the last 3 parameters from the fit
+    map_parameters = get_MAP(results)
+    map_parameters = map_parameters[:-3]
+
+    # Get accurate redshifts from the MAP (obtained by MJ)    
+    zred = map_parameters[0]
+    print(f"Processing galaxy {objid} at redshift z = {zred}")
+
     # Build model matching original setup
     model = build_model(objid, zred, add_duste=results['run_params']['add_duste'],
                     add_neb=False,  # Set add_neb to False
@@ -515,50 +540,29 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
                     fit_afe=results['run_params']['fit_afe'])
     
     model.params['polyorder'] = 10
-        
-    # Now we have to exclude the last 3 parameters from the fit
-    map_parameters = get_MAP(results)
-    map_parameters = map_parameters[:-3]
-    
-    
-    for a, b in zip(model.theta_labels(), map_parameters):
-        print(f"{a}: {b}")
-    
-    
-    #params_file = '/Users/benjamincollins/University/master/Red_Cardinal/prospector/params/params_MAP_12717.pkl'
-    #params_dict = pkl.load(open(params_file, 'rb'))
-    
-    # Ensure this gives you the correct order expected by the model
-    #param_order = model.theta_labels()
-    #print(model.theta_labels())
-    
-    # Extract the values from the dictionary in this order
-    #theta_map = [params_dict[key] for key in param_order]
 
-    #print("\nMAP parameters loaded from file:", theta_map)
-    
-    #zred_used = map_parameters['zred']
-    #print("\nRedshift used for prediction:", zred_used)
-
-    # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
-    sps = FastStepBasis(zcontinuous=1)
-        
+    # Obtain best fit model spectrum and model photometry
     spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
-    
-    calib_vector = model._speccal
 
+    # Calculate calibration vector
+    calib_vector = model._speccal
+    
     #get the spectral jitter  for the errors
     #spec_jitter = map_parameters[5]
     #errs = obs['unc']*spec_jitter/calib_vector * 3631 # observational errors
     
-    fig, ax = plt.subplots(figsize=(10, 6))
     
     factor = 3631e6 # maggies to µJy conversion factor
     
-    spec = spec/calib_vector * factor    # convert to µJy
-    
     # Redshifted model spectrum
     wave_spec = sps.wavelengths * 1e-4 * (1 + zred)   # convert to µm, redshifted
+
+    print(spec)
+    plt.plot(wave_spec, spec)
+    plt.plot(wave_spec[obs['mask']], obs['spectrum'][obs['mask']])
+    plt.show()
+    return None
+    
     
     # Define the style per instrument
     instrument_styles = {
@@ -567,30 +571,89 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
         'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST NIRCam', 'ms': 10},
         'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST MIRI', 'ms': 10}
     }
-
-    """
-    # Apply HST correction BEFORE the plotting loop
-    hst_flux_correction = 0.74  # 100% - 26% = 74%
-    corrected_fluxes = obs['maggies_all'].copy()
-    corrected_errors = obs['maggies_unc_all'].copy()
+    
+    ratio = []
+    for p,o in zip(phot, obs['maggies']):
+        ratio.append(o/p)
+    corr = np.mean(ratio)
+    print("Ratios: ", ratio)
+    print("Mean ratio: ", corr)
+    print("Standard deviation: ", np.std(ratio))
+    
+    # Initialise the plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    ################################################
+    #########   PLOT POSTERIOR SAMPLES     #########
+    ################################################
+    
+    nsample = 100
+    samples = posterior_samples(results, nsample)
+    
+    all_specs = []
+    for params_i in samples:
+        params_i = params_i[:-3]
+        spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
+        calib_vector_i = model._speccal
+        spec_i = spec_i/calib_vector_i * factor    # convert to µJy
+        all_specs.append(spec_i)
+        
+    all_specs = np.array(all_specs)  # shape: (nsample, nwave)
+    
+    lower = np.percentile(all_specs, 16, axis=0)
+    upper = np.percentile(all_specs, 84, axis=0)
+    
+    ax.fill_between(wave_spec, lower, upper, color='crimson', alpha=0.2, label='1σ uncertainty')
+    
+    for i in range(10):
+        ax.plot(wave_spec, all_specs[i], color='crimson', alpha=0.15, lw=0.8)
+    
+    ################################################
+    #########       PLOT THE BEST FIT      #########
+    ################################################
+    
+    spec = spec/calib_vector * factor    # convert to µJy
+    ax.plot(wave_spec, spec, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
+    
+    ################################################
+    #########   PLOT OBSERVED SPECTRUM     #########
+    ################################################
+    
+    spec_new, _, _ = model.predict(map_parameters, obs=loaded_obs, sps=sps)
+    
+    #calib_vector = model.spec_calibration(obs=loaded_obs, spec=spec_new)
+    new_calib_vector = model._speccal
+    mask = loaded_obs['mask']
+    #print("Calibration vector:", calib_vector)
+        
+    wavelengths = loaded_obs['wavelength'][mask] * 1e-4  # convert to µm
+    spectrum  = loaded_obs['spectrum'][mask] / new_calib_vector[mask] * factor
+    
+    #ax.plot(wavelengths, spectrum, '-', color='blue', alpha=0.8, lw=1.5, label='Observed spectrum')
+    
+    ################################################
+    ######### PLOT THE CALIBRATED SPECTRUM #########
+    ################################################
+    
+    param_file = '/Users/benjamincollins/University/master/Red_Cardinal/prospector/spec_calib/spec_calibrated_12717.pkl'
+    data = pkl.load(open(param_file, 'rb'))
+    cal_spec = data['emi_off']['MAP']['wave_obs'] * factor
+    lambdas = data['wave_obs'] * 1e-4
+    ax.plot(lambdas, cal_spec, linestyle="-", alpha=0.8, lw=1.5, label="Calibrated spectrum")
+    
+    ################################################
+    #########    PLOT MODEL PHOTOMETRY     #########
+    ################################################
+    
+    wave_model = np.array([filt.wave_effective for filt in obs['filters']]) * 1e-4  # µm
+    phot *= factor  # µJy
+    ax.plot(wave_model, phot, 'd', markersize=6, color='black', label='Model photometry')
+    
+    ################################################
+    #########  PLOT MEASURED PHOTOMETRY    #########
+    ################################################
 
     for i, filt in enumerate(obs['filters_all']):
-        fname = filt.name.lower()
-        if 'acs' in fname or 'wfc3' in fname:
-            # Apply 26% downward correction to flux
-            corrected_fluxes[i] *= hst_flux_correction
-
-            # Add 26% relative error in quadrature
-            relative_error = 0.26 * corrected_fluxes[i]
-            corrected_errors[i] = np.sqrt(corrected_errors[i]**2 + relative_error**2)
-
-    # Update obs dictionary
-    obs['maggies_all'] = corrected_fluxes
-    obs['maggies_unc_all'] = corrected_errors
-    """
-
-    # Loop through each filter and plot
-    for i, filt in enumerate(obs['filters']):
         name = filt.name.lower()
 
         if 'acs' in name:
@@ -604,10 +667,10 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
         else:
             continue  # skip unknown filters
 
-        wave = obs['phot_wave'][i] * 1e-4  # convert to µm
-        flux = obs['maggies'][i] * factor  # µJy
-        err  = obs['maggies_unc'][i] * factor  # µJy
-
+        wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
+        flux = obs['maggies_all'][i] * factor  # µJy
+        err  = obs['maggies_unc_all'][i] * factor  # µJy
+        
         ax.errorbar(
             wave, flux, yerr=err,
             fmt=style['marker'],
@@ -618,62 +681,6 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
             label=style['label'] if style['label'] not in ax.get_legend_handles_labels()[1] else None
         )
 
-    # Model photometry (used in fit)
-    wave_model = np.array([filt.wave_effective for filt in obs['filters']]) * 1e-4  # µm
-    phot *= factor  # µJy
-    ax.plot(wave_model, phot, 'd', markersize=6, color='black', label='Model photometry')
-    
-    
-    # Observed spectrum
-    #obs_file = f'/Users/benjamincollins/University/master/Red_Cardinal/prospector/obs/obs_{objid}.npy'
-    #loaded_obs = np.load(obs_file, allow_pickle=True).item()
-    
-    loaded_obs = obs
-
-    spec_new, _, _ = model.predict(map_parameters, obs=loaded_obs, sps=sps)
-    spec_new = spec
-    
-    calib_vector = model.spec_calibration(obs=loaded_obs, spec=spec_new)
-    mask = loaded_obs['mask']
-    print("Calibration vector:", calib_vector)
-    
-    wavelengths = loaded_obs['wavelength'][mask] * 1e-4  # convert to µm
-    spectrum  = loaded_obs['spectrum'][mask] / calib_vector[mask]
-    
-    ax.plot(wavelengths, spectrum, label="Observed Spectrum", color='royalblue', alpha=0.7)
-    
-    # Full SED
-    ax.plot(obs['wavelength']*1e-4, spec, '-', color='crimson', alpha=0.6, lw=1.5, label='Best-fit model')
-
-    """
-    # Number of posterior samples to use
-    nsample = 200
-    samples = random.sample(range(results['chain'].shape[0]), nsample)
-    
-    # Store predicted spectra
-    specs = []
-    chain = np.asarray(results['chain'])    # Read as array for easier indexing
-    
-    for i in samples:
-        theta = chain[i]
-        spec_i, _, _ = model.predict(theta[:-3], obs=obs, sps=sps)
-        specs.append(spec_i)
-
-    # Convert to array: shape (nsample, nwave)
-    specs = np.array(specs)
-
-    # Compute 16th and 84th percentile envelope
-    spec_lo = np.percentile(specs, 16, axis=0)
-    spec_hi = np.percentile(specs, 84, axis=0)
-    
-    spec_lo *= factor  # Convert to µJy
-    spec_hi *= factor  # Convert to µJy
-    spec_med = np.percentile(specs, 50, axis=0)  # Optional: median spectrum
-    
-    ax.fill_between(wave_spec, spec_lo, spec_hi, 
-                    color='firebrick', alpha=0.1, label='1σ range')
-    """
-    
     # Compute bounds
     ymin = np.min(spec)
     ymax = np.max(spec)
@@ -685,7 +692,7 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
 
     # Set limits
     ax.set_ylim(ymin_plot, ymax_plot)
-    
+
     # Plot formatting
     ax.set_xlabel('Observed Wavelength (µm)')
     ax.set_ylabel('Flux (µJy)')
@@ -699,11 +706,14 @@ def plot_reconstruction_with_miri(objid, output_dir=None):
     plt.tight_layout()
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        fname = os.path.join(output_dir, f'{objid}_miri_overlay_v3.png')
+        fname = os.path.join(output_dir, f'{objid}_miri_overlay_with_two_specs.png')
         plt.savefig(fname)
         print(f"Saved plot to {fname}")
     plt.show()
     plt.close()
+    
+    plt.plot(wavelengths, new_calib_vector[mask])
+    plt.show()
     
     return obs, model, results
 
@@ -718,8 +728,5 @@ galaxy_ids = [str(gid) for gid in table['ID']]
 #    with ProcessPoolExecutor(max_workers=max_workers) as executor:
 #        executor.map(plot_reconstruction_with_miri, galaxy_ids)
 
-
-# To Do:
-# - Multiply observed spectrum by the mask
-# - Add spectrum after prediction
-# - 
+# Todo
+# Try overplotting calibrated spectrum from Dropbox and see if it aligns either with the photometry or with the fit
