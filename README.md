@@ -22,12 +22,6 @@ red_cardinal/
 ├── rotate_fits.ipynb
 └── webbpsf_tutorial.ipynb
 ```
-## 🛠️ Development Notes
-
-* Make sure to periodically sync this repository to GitHub to avoid data loss.
-* Use meaningful commit messages to track changes effectively.
-* Test each function locally before pushing to the main branch to maintain code quality.
-
 ## 📄 License
 
 This project is intended for personal academic use. If you wish to use it for other purposes, please contact me for permission.
