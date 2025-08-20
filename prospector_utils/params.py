@@ -21,7 +21,7 @@ from prospect.models import priors
 from prospect.models.templates import TemplateLibrary
 from prospect.models import transforms
 from astropy.cosmology import WMAP9 as cosmo
-from prospect.models.sedmodel import PolySpecModel
+from prospect.models.sedmodel import PolySpecModel, SpecModel
 from prospect.utils.obsutils import fix_obs
 from prospect.utils.plotting import posterior_samples
 
@@ -31,7 +31,8 @@ from scipy.signal import medfilt
 from scipy import interpolate
 
 
-
+bluejay = '/Users/benjamincollins/University/Master/Red_Cardinal/BlueJay/bluejay_phot_cat_v1.4.fits'
+miri_phot = '/Users/benjamincollins/University/Master/Red_Cardinal/photometry/phot_tables/Photometry_Table_MIRI.fits'
 
 def get_MAP(res, verbose=False):
     """
@@ -67,10 +68,10 @@ def build_obs(objid):
     """Build observation dictionary with photometry (no spectroscopy)"""
     
     # Load photometry data
-    phot_hst_nircam = fits.open(cat_dir + 'bluejay_phot_cat_v1.4.fits')[1].data
+    phot_hst_nircam = fits.open(bluejay)[1].data
     ph_hst_nircam = phot_hst_nircam[phot_hst_nircam['ID'] == objid]
     
-    phot_miri = fits.open(cat_dir + 'Photometry_Table_MIRI.fits')[1].data
+    phot_miri = fits.open(miri_phot)[1].data
     ph_miri = phot_miri[phot_miri['ID'] == objid]
     
     if ph_miri is None or len(ph_miri) == 0:
@@ -203,7 +204,7 @@ def logmass_to_masses(logmass=None, logsfr_ratios=None, zred=None, **extras):
 def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_agn=False, fit_afe=False,
                 polyorder=10, 
                 **extras):
-    """Build a prospect.models.SedModel object
+    """Build a prospect.models.PolySpecModel object
 
     :param zred: (optional, default: None)
         approximate value for the redshift, which is left as a free parameter.
@@ -214,6 +215,9 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     :returns model:
         An instance of prospect.models.SedModel
     """    
+    
+    print("zred: ", zred)
+    print("waverange: ", waverange)
     
     # continuity SFH
     model_params = TemplateLibrary["continuity_sfh"]
@@ -292,7 +296,7 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     # ----------------------------
     # A non-parametric SFH model of mass in fixed time bins with a smoothness prior
     
-    tuniv = cosmo.age(zred).value*1e6
+    tuniv = cosmo.age(zred).value#*1e6
     #agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.95*tuniv*1000), 13), tuniv*1000 )
     agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
     agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
@@ -371,6 +375,8 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     
     if add_duste:
         # Add dust emission (with fixed dust SED parameters)
+        print("Adding dust emission...")
+        
         model_params.update(TemplateLibrary["dust_emission"])
         model_params['duste_gamma']['isfree'] = True
         model_params['duste_gamma']['init']  = 0.01
@@ -383,9 +389,13 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
         model_params['duste_umin']['isfree'] = True
         model_params['duste_umin']['init']   = 1.0
         model_params['duste_umin']['prior']  = priors.TopHat(mini=0.1, maxi=25.0)
-
+    else:
+        print("Dust emission is turned off.")
+        
     if add_agn:
         # Allow for the presence of an AGN in the mid-infrared
+        print("Adding AGN emission...")
+        
         model_params.update(TemplateLibrary["agn"])
         model_params['fagn']['isfree'] = True
         model_params['fagn']['prior'] = priors.LogUniform(mini=1e-5, maxi=3.0)
@@ -394,6 +404,8 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
 
     if add_neb:
         # Add nebular emission
+        print("Adding nebular emission...")
+        
         model_params.update(TemplateLibrary["nebular"])
         model_params['gas_logu']['isfree'] = True
         model_params['gas_logz']['isfree'] = True

@@ -4,18 +4,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle as pkl
 from datetime import datetime
-
+import fsps
 import prospect.io.read_results as reader
 from prospect.sources import FastStepBasis
 from prospect.utils.plotting import posterior_samples
 from .params import build_obs, build_model, get_MAP
+from sedpy.observate import getSED
+from astropy import constants as const
 
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
 dirout = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
 
 
-def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
+def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     """Main function to reconstruct and plot PROSPECTOR results with MIRI data"""
     
     # Load the h5 file for the given objid
@@ -25,14 +27,11 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
         h5_file = h5_file[0]
     except IndexError:
         print(f"No PROSPECTOR results found for objid {objid}.")
-        return None, None, None
+        return None
 
     # Load PROSPECTOR results
     full_path = os.path.join(dirout, h5_file)
-    results, loaded_obs, model = reader.results_from(full_path)
-
-    # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
-    sps = FastStepBasis(zcontinuous=1)
+    results, loaded_obs, loaded_model = reader.results_from(full_path)
     
     # Build new observations including MIRI
     obs = build_obs(objid)
@@ -40,69 +39,73 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     # Now we have to exclude the last 3 parameters from the fit
     map_parameters = get_MAP(results)
     
+    original_theta_labels = results['theta_labels']
+    original_map_parameters = map_parameters.copy()  # Keep original for reference
+    
     # Build the MAP dictionary
     MAP = {}
     for a,b in zip(results['theta_labels'], map_parameters):
         MAP[a] = b
     
-    if add_dust == True:
+    # Section to decide whether to include dust emission or not
+    if add_duste == True:
         map_parameters = map_parameters[:-3]
         add_duste = results['run_params']['add_duste']
+        add_agn = results['run_params']['add_agn']  # Maybe check if this is True?
+        suffix = None
     else:
-        add_duste = False
+        map_parameters = map_parameters[:-6]
+        add_agn = False
+        suffix = "nodust"
         
     # Get accurate redshifts from the MAP (obtained by MJ)    
     zred = map_parameters[0]
     print(f"Processing galaxy {objid} at redshift z = {zred}")
 
     # Build model matching original setup    
-    model = build_model(objid, zred, add_duste=add_duste,
-                    add_neb=False,  # Set add_neb to False
-                    add_agn=results['run_params']['add_agn'],
-                    fit_afe=results['run_params']['fit_afe'])
+    # Somehow this works if zred=objid and waverange=zred, but not if I pass the arguments correctly
+    model = build_model(zred=zred,
+                        waverange=None,
+                        add_duste=add_duste,
+                        add_neb=False,  # Set add_neb to False
+                        add_agn=add_agn,
+                        fit_afe=results['run_params']['fit_afe']
+                        )
     
     model.params['polyorder'] = 10
-    
-    print("model.ndim:", model.ndim)
-    print("model.theta_index:", model.theta_index)
-    
-    if add_dust == False:
-        # Collapse logsfr_ratios_N into a single array
-        logsfr_ratios = np.array([MAP[f'logsfr_ratios_{i}'] for i in range(1, 14)])
-        print("logsfr_ratios = ", logsfr_ratios)
-        
-        # Then build the filtered MAP
-        filtered_map = {
-            'zred': MAP['zred'],
-            'logzsol': MAP['logzsol'],
-            'sigma_smooth': MAP['sigma_smooth'],
-            'f_outlier_spec': MAP['f_outlier_spec'],
-            'f_outlier_phot': MAP['f_outlier_phot'],
-            'spec_jitter': MAP['spec_jitter'],
-            'logmass': MAP['logmass'],
-            'logsfr_ratios': logsfr_ratios,
-            'dust2': MAP['dust2'],
-            'dust_index': MAP['dust_index'],
-            'dust1_fraction': MAP['dust1_fraction'],
-        }
-        
-        # Convert filtered_map to theta vector in correct order
-        theta = []
-        for param in model.theta_index:
-            if param == 'logsfr_ratios':
-                theta.extend(filtered_map[param])
-            else:
-                theta.append(filtered_map[param])
 
-        #map_parameters = np.array(theta)
+    print("New model.ndim:", model.ndim)
+    print("New model.theta_index:", model.theta_index)
+    print("New model theta_labels:", [model.theta_labels()[i] for i in range(model.ndim)])
 
-        for a,b in zip(results['theta_labels'],map_parameters):
-            print(a, b)
-        
-        print("theta length:", len(map_parameters))
-        print("theta:", map_parameters)
+    # Map parameters from original fit to new model structure
+    new_theta_labels = [model.theta_labels()[i] for i in range(model.ndim)]
+    new_map_parameters = []
     
-    return None
+    # Create mapping between old and new parameter structures
+    for new_label in new_theta_labels:
+        if new_label in original_theta_labels:
+            old_idx = original_theta_labels.index(new_label)
+            new_map_parameters.append(original_map_parameters[old_idx])
+            print(f"Mapped {new_label}: {original_map_parameters[old_idx]}")
+        else:
+            # This shouldn't happen if we're just removing dust parameters
+            print(f"Warning: {new_label} not found in original parameters")
+            new_map_parameters.append(0.0)  # Default value
+
+    new_map_parameters = np.array(new_map_parameters)
+
+    print(f"Original parameters length: {len(original_map_parameters)}")
+    print(f"New parameters length: {len(new_map_parameters)}")
+    print(f"New model expects: {model.ndim} parameters")
+    
+    #for a,b in zip(results['theta_labels'],map_parameters):
+    #    print(a, b)
+    
+    #print("Adjusted length of map_parameters: ", len(map_parameters), "\n")
+
+    # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
+    sps = FastStepBasis(zcontinuous=1)
 
     # Obtain best fit model spectrum and model photometry    
     spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
@@ -111,11 +114,11 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     #spec_jitter = map_parameters[5]
     #errs = obs['unc']*spec_jitter/calib_vector * 3631 # observational errors
     
-    factor = 3631e6 # maggies to µJy conversion factor
+    maggies_to_muJy = 3631e6 # maggies to µJy conversion factor
     
-    # Redshifted model spectrum
-    wave_spec = sps.wavelengths * 1e-4 * (1 + zred)   # convert to µm, redshifted    
-    
+    # wavelengths of the model spectrum
+    wave_spec = sps.wavelengths
+    wave_spec_rs = sps.wavelengths * 1e-4 * (1 + zred)   # convert to µm, redshifted    
     
     # Convert to arrays
     phot = np.array(phot)
@@ -152,8 +155,6 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     print("Mean ratio between photometries: ", corr_factor)
     print("Standard deviation: ", corr_uncertainty)
     
-    scale_factor = corr_factor * factor
-    
     # Initialise the plot
     fig, ax = plt.subplots(figsize=(10, 6))
     
@@ -166,24 +167,32 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     for params_i in samples:
         params_i = params_i[:-3]
         spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
-        spec_i = spec_i * scale_factor    # convert to µJy
         all_specs.append(spec_i)
         
     all_specs = np.array(all_specs)  # shape: (nsample, nwave)
     
+    # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
     lower = np.percentile(all_specs, 16, axis=0)
     median = np.percentile(all_specs, 50, axis=0)
     upper = np.percentile(all_specs, 84, axis=0)
     
-    ax.fill_between(wave_spec, lower, upper, color='crimson', alpha=0.2, label='1σ uncertainty')
+    # Convert to µJy
+    lower_scaled = lower * maggies_to_muJy    
+    median_scaled = median * maggies_to_muJy
+    upper_scaled = upper * maggies_to_muJy
+    
+    # Plot shaded region for 1σ uncertainty
+    ax.fill_between(wave_spec_rs, lower_scaled, upper_scaled, color='crimson', alpha=0.2, label='1σ uncertainty')
     
     for i in range(10):
-        ax.plot(wave_spec, all_specs[i], color='crimson', alpha=0.15, lw=0.8)
+        ax.plot(wave_spec_rs, all_specs[i]*maggies_to_muJy, color='crimson', alpha=0.15, lw=0.8)
     
+    #ax.plot(wave_spec_rs, lower_scaled, color='blue', lw=0.8, label='16th percentile')
+    #ax.plot(wave_spec_rs, upper_scaled, color='blue', lw=0.8, label='84th percentile')
     #########       PLOT THE BEST FIT      #########
     
-    spec = spec * scale_factor    # convert to µJy
-    ax.plot(wave_spec, spec, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
+    spec_scaled = spec * maggies_to_muJy    # convert to µJy
+    ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
     
     #########   PLOT OBSERVED SPECTRUM     #########
     
@@ -208,10 +217,11 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     
     #########    PLOT MODEL PHOTOMETRY     #########
     
-    wave_phot = np.array([filt.wave_effective for filt in obs['filters']]) * 1e-4  # µm
-    wave_phot = wave_phot[valid]
-    phot = phot * scale_factor  # µJy
-    ax.plot(wave_phot, phot, 'd', markersize=6, color='black', label='Model photometry')
+    wave_phot = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
+    wave_phot_microns = wave_phot * 1e-4  # convert to µm
+    wave_phot_microns = wave_phot_microns[valid]
+    phot_scaled = phot * maggies_to_muJy  # convert maggies to µJy
+    ax.plot(wave_phot_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
     
     #########  PLOT MEASURED PHOTOMETRY    #########
 
@@ -219,10 +229,10 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     # Thanks to the function this is literally a one-liner now
     
     # Compute bounds
-    wave_mask = (wave_spec >= 0.4) & (wave_spec <= 35)
-    # Apply mask to spectrum(s)
-    spec_within = spec[wave_mask]  # works for 1D or 2D (e.g. percentiles)
+    wave_mask = (wave_spec_rs >= 0.4) & (wave_spec_rs <= 35)
     
+    # Apply mask to spectrum(s)
+    spec_within = spec_scaled[wave_mask]  # works for 1D or 2D (e.g. percentiles)
     spec_within = [ele for ele in spec_within if ele > 0]
 
     # Compute y-axis limits
@@ -233,15 +243,13 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     ymin_plot = ymin * 0.2  # reduce, but stay > 0
     ymax_plot = ymax * 5   # increase
 
-    print(ymin_plot)
-
     # Set limits
     ax.set_ylim(ymin_plot, ymax_plot)
 
     # Plot formatting
     ax.set_xlabel('Observed Wavelength (µm)')
     ax.set_ylabel('Flux (µJy)')
-    ax.set_xlim(0.4, 35)    
+    ax.set_xlim(0.4, 35)#200)    # Change x range    
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.legend()
@@ -252,7 +260,7 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
     
     if plot_dir:
         os.makedirs(plot_dir, exist_ok=True)
-        fname = os.path.join(plot_dir, f'{objid}_custom_calib.png')
+        fname = os.path.join(plot_dir, f'{objid}_{suffix}.png')
         plt.savefig(fname)
         print(f"✅ Plot saved to {fname}")
     plt.show()
@@ -274,16 +282,9 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
                 'phot': phot,
                 'wave_phot': wave_phot
             },
-                
+            
             # One entry for the observation dictionary
             'obs': obs,
-            
-            # One entry for the calibration statistics
-            'calib': {
-                'correction': corr_factor,
-                'uncertainty': corr_uncertainty,
-                'method': 'weighted mean of (obs/model) in available filters'
-            },
             'galaxy_id': objid,
             'redshift': zred,
             'saved_at': datetime.now().isoformat()
@@ -295,8 +296,17 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_dust=True):
 
         print(f"✅ Fit results saved to: {filename}")
     
+
+def plot_transmission_curves(ax, filters):
+    """Plot the transmission curves of the given filters on the provided axis."""
+    # overlay filters
+    for f in filters:
+        lam = f.wavelength        # wavelength grid (Å)
+        trans = f.transmission    # dimensionless throughput (0–1)
+        ax.plot(lam, trans, label=f.name)
     
 def plot_photometry(ax, obs, factor=3631e6):
+    """Plot the photometry data on the provided axis."""
     
     # Define the style per instrument
     instrument_styles = {
@@ -364,10 +374,22 @@ def load_and_display(objid):
     corr_unc = fit_data['calib']['uncertainty']
     corr_method = fit_data['calib']['method']
     
+    factor = 3631e6  # maggies to µJy conversion factor
+    scale_factor = corr_factor * factor
+    
+    wave_spec = wave_spec * 1e-4 * (1 + zred)
+    spec = spec * scale_factor # convert to µJy
+    median = median * scale_factor
+    lower = lower * scale_factor
+    upper = upper * scale_factor
+    
+    wave_phot = wave_phot * 1e-4 # convert to microns
+    phot = phot * scale_factor  # convert to µJy
+    
     print(f"Correction factor used to calibrate the spectrum: {corr_factor}")
     print(f"Uncertainty on the calibration: {corr_unc}")
     print(f"The calibration was obtained using the {corr_method}.")
-    
+
     # Initialise the plot
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -390,7 +412,8 @@ def load_and_display(objid):
     wave_mask = (wave_spec >= 0.4) & (wave_spec <= 35)
     # Apply mask to spectrum(s)
     spec_within = spec[wave_mask]  # works for 1D or 2D (e.g. percentiles)
-
+    spec_within = [ele for ele in spec_within if ele > 0]
+    
     # Compute y-axis limits
     ymin = np.nanmin(spec_within)
     ymax = np.nanmax(spec_within)
@@ -412,4 +435,5 @@ def load_and_display(objid):
     
     plt.tight_layout()
     plt.show()
+    
     
