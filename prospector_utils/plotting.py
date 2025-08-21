@@ -11,6 +11,7 @@ from prospect.utils.plotting import posterior_samples
 from .params import build_obs, build_model, get_MAP
 from sedpy.observate import getSED
 from astropy import constants as const
+import pandas as pd
 
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
@@ -52,7 +53,7 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         map_parameters = map_parameters[:-3]
         add_duste = results['run_params']['add_duste']
         add_agn = results['run_params']['add_agn']  # Maybe check if this is True?
-        suffix = None
+        suffix = ""
     else:
         map_parameters = map_parameters[:-6]
         add_agn = False
@@ -74,9 +75,9 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     
     model.params['polyorder'] = 10
 
-    print("New model.ndim:", model.ndim)
-    print("New model.theta_index:", model.theta_index)
-    print("New model theta_labels:", [model.theta_labels()[i] for i in range(model.ndim)])
+    #print("New model.ndim:", model.ndim)
+    #print("New model.theta_index:", model.theta_index)
+    #print("New model theta_labels:", [model.theta_labels()[i] for i in range(model.ndim)])
 
     # Map parameters from original fit to new model structure
     new_theta_labels = [model.theta_labels()[i] for i in range(model.ndim)]
@@ -87,7 +88,7 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         if new_label in original_theta_labels:
             old_idx = original_theta_labels.index(new_label)
             new_map_parameters.append(original_map_parameters[old_idx])
-            print(f"Mapped {new_label}: {original_map_parameters[old_idx]}")
+            #print(f"Mapped {new_label}: {original_map_parameters[old_idx]}")
         else:
             # This shouldn't happen if we're just removing dust parameters
             print(f"Warning: {new_label} not found in original parameters")
@@ -95,9 +96,9 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
 
     new_map_parameters = np.array(new_map_parameters)
 
-    print(f"Original parameters length: {len(original_map_parameters)}")
-    print(f"New parameters length: {len(new_map_parameters)}")
-    print(f"New model expects: {model.ndim} parameters")
+    #print(f"Original parameters length: {len(original_map_parameters)}")
+    #print(f"New parameters length: {len(new_map_parameters)}")
+    #print(f"New model expects: {model.ndim} parameters")
     
     #for a,b in zip(results['theta_labels'],map_parameters):
     #    print(a, b)
@@ -110,10 +111,6 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     # Obtain best fit model spectrum and model photometry    
     spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
     
-    #get the spectral jitter  for the errors
-    #spec_jitter = map_parameters[5]
-    #errs = obs['unc']*spec_jitter/calib_vector * 3631 # observational errors
-    
     maggies_to_muJy = 3631e6 # maggies to µJy conversion factor
     
     # wavelengths of the model spectrum
@@ -123,26 +120,13 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     # Convert to arrays
     phot = np.array(phot)
     maggies = np.array(obs['maggies'])
-    phot_err = np.array(obs['maggies_unc'])
+    maggies_unc = np.array(obs['maggies_unc'])
 
-    # Avoid divide-by-zero or NaN issues
-    valid = (
-        (phot > 0) & 
-        (maggies > 0) & 
-        np.isfinite(phot) & 
-        np.isfinite(maggies) & 
-        np.isfinite(phot_err) & 
-        (phot_err > 0)
-    )
-
-    # Masked, valid values only
-    phot = phot[valid]
-    maggies = maggies[valid]
-    phot_err = phot_err[valid]
-
+    assert len(phot) == len(maggies), 'Model photometry does not match observed photometry length'
+    
     # Compute ratio and weights
     ratio = maggies / phot
-    weights = 1.0 / phot_err**2
+    weights = 1.0 / maggies_unc**2
 
     # Weighted average correction factor
     corr_factor = np.sum(ratio * weights) / np.sum(weights)
@@ -155,6 +139,12 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     print("Mean ratio between photometries: ", corr_factor)
     print("Standard deviation: ", corr_uncertainty)
     
+    #for f, phot in zip(obs['filters'], maggies):
+    #    print(f"{f.name}: {phot} maggies")
+        
+    #for f, phot in zip(obs['filters_all'], obs['maggies_all']):
+    #    print(f"{f.name}: {phot} maggies")
+        
     # Initialise the plot
     fig, ax = plt.subplots(figsize=(10, 6))
     
@@ -194,32 +184,10 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     spec_scaled = spec * maggies_to_muJy    # convert to µJy
     ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
     
-    #########   PLOT OBSERVED SPECTRUM     #########
-    
-    #spectrum  = loaded_obs['spectrum'][mask] / calib_vector[mask] * factor
-    
-    obs['mask'] = loaded_obs['mask']
-    obs['spectrum'] = loaded_obs['spectrum']
-    obs['wavelength'] = loaded_obs['wavelength']
-    obs['unc'] = loaded_obs['unc']
-    
-    print("Successfully added observed spectrum to obs file.")
-    
-    #ax.plot(wavelengths, spectrum, '-', color='blue', alpha=0.8, lw=1.5, label='Observed spectrum')
-    
-    ######### PLOT THE CALIBRATED SPECTRUM #########
-    
-    #param_file = '/Users/benjamincollins/University/master/Red_Cardinal/prospector/spec_calib/spec_calibrated_12717.pkl'
-    #data = pkl.load(open(param_file, 'rb'))
-    #cal_spec = data['emi_off']['MAP']['wave_obs'] * factor
-    #lambdas = data['wave_obs'] * 1e-4
-    #ax.plot(lambdas, cal_spec, linestyle="-", alpha=0.8, lw=1.5, label="Calibrated spectrum")
-    
     #########    PLOT MODEL PHOTOMETRY     #########
     
     wave_phot = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
     wave_phot_microns = wave_phot * 1e-4  # convert to µm
-    wave_phot_microns = wave_phot_microns[valid]
     phot_scaled = phot * maggies_to_muJy  # convert maggies to µJy
     ax.plot(wave_phot_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
     
@@ -262,7 +230,6 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         os.makedirs(plot_dir, exist_ok=True)
         fname = os.path.join(plot_dir, f'{objid}_{suffix}.png')
         plt.savefig(fname)
-        print(f"✅ Plot saved to {fname}")
     plt.show()
     plt.close()
     
@@ -285,6 +252,17 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
             
             # One entry for the observation dictionary
             'obs': obs,
+            
+            # Alignment between the model and observed photometry
+            'alignment': {
+                'ratio': ratio,
+                'corr_factor': corr_factor,
+                'corr_uncertainty': corr_uncertainty,
+                'weights': weights,
+                'maggies_to_muJy': maggies_to_muJy
+            },
+
+            # Remaining useful data
             'galaxy_id': objid,
             'redshift': zred,
             'saved_at': datetime.now().isoformat()
@@ -294,6 +272,9 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         with open(filename, 'wb') as f:
             pkl.dump(fit_data, f)
 
+    if plot_dir:
+        print(f"✅ Plot saved to {fname}")
+    if stats_dir:    
         print(f"✅ Fit results saved to: {filename}")
     
 
@@ -333,7 +314,7 @@ def plot_photometry(ax, obs, factor=3631e6):
         wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
         flux = obs['maggies_all'][i] * factor  # µJy
         err  = obs['maggies_unc_all'][i] * factor  # µJy
-        
+
         ax.errorbar(
             wave, flux, yerr=err,
             fmt=style['marker'],
@@ -346,15 +327,13 @@ def plot_photometry(ax, obs, factor=3631e6):
         
         
 
-def load_and_display(objid):
+def load_and_display(objid, mod=None, mod_err=None):
     path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_files/{objid}.pkl'
     with open(path_to_pkl, 'rb') as f:
         fit_data = pkl.load(f)
     
-    date_and_time = fit_data['saved_at']
     zred = fit_data['redshift']
     print(f"Loading fit data of galaxy {objid} at redshift {zred}")
-    print(f"Fit was reconstructed on {date_and_time}")
     
     # Load model spectra
     spec = fit_data['model']['spec_bestfit']
@@ -370,26 +349,17 @@ def load_and_display(objid):
     # Load observation dictionary
     obs = fit_data['obs']
     
-    corr_factor = fit_data['calib']['correction']
-    corr_unc = fit_data['calib']['uncertainty']
-    corr_method = fit_data['calib']['method']
-    
     factor = 3631e6  # maggies to µJy conversion factor
-    scale_factor = corr_factor * factor
     
     wave_spec = wave_spec * 1e-4 * (1 + zred)
-    spec = spec * scale_factor # convert to µJy
-    median = median * scale_factor
-    lower = lower * scale_factor
-    upper = upper * scale_factor
+    spec *= factor # convert to µJy
+    median *= factor
+    lower *= factor
+    upper *= factor
     
     wave_phot = wave_phot * 1e-4 # convert to microns
-    phot = phot * scale_factor  # convert to µJy
+    phot *= factor  # convert to µJy
     
-    print(f"Correction factor used to calibrate the spectrum: {corr_factor}")
-    print(f"Uncertainty on the calibration: {corr_unc}")
-    print(f"The calibration was obtained using the {corr_method}.")
-
     # Initialise the plot
     fig, ax = plt.subplots(figsize=(10, 6))
 
@@ -403,11 +373,23 @@ def load_and_display(objid):
     ax.plot(wave_spec, spec, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
 
     # Plot model photometry
-    ax.plot(wave_phot, phot, 'd', markersize=6, color='black', label='Model photometry')
+    ax.plot(wave_phot, phot, 'd', markersize=6, color='black', label='Model photometry (Prospector)')
 
+    # Plot model photometry created with sedpy
+    if mod is not None and mod_err is not None:
+        # Plot provided photometry with error bars
+        wave_phot_all = obs['phot_wave_all'] * 1e-4  # convert to microns
+        
+        miri_mask = (wave_phot_all > 7) & (wave_phot_all < 25)  # AA
+        wave_phot_all = wave_phot_all[miri_mask]
+        mod_err = np.full_like(mod, mod_err)  # Ensure phot_err is the same length as phot
+                
+        ax.errorbar(wave_phot_all, mod*factor, yerr=mod_err*factor, fmt='d', color='blue', label='Model photometry (Sedpy)', markersize=6)
+    
+    
     # Plot measured photometry
     plot_photometry(ax, obs)
-
+    
     # Compute bounds
     wave_mask = (wave_spec >= 0.4) & (wave_spec <= 35)
     # Apply mask to spectrum(s)
@@ -437,3 +419,67 @@ def load_and_display(objid):
     plt.show()
     
     
+def create_hist(csv_path, out_dir, bins=25):
+    """
+    Create a histogram of the N_sigma values for all galaxies and for all bands as stored in the csv file.
+    """
+    try:
+        df = pd.read_csv(csv_path)
+    except FileNotFoundError:
+        print(f"File {csv_path} not found. Please check the file path.")
+        return
+    
+    print(f"Loaded {len(df)} rows from {csv_path}")
+    
+    
+    # Create output folder
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Compute global x-axis limits (clip outliers if needed)
+    x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
+    bins = np.linspace(x_min, x_max, 25)
+
+    filters = df['filter_name'].unique()
+
+    for f in filters:
+        subset = df[df['filter_name'] == f]
+
+        plt.figure(figsize=(6,4))
+        plt.hist(subset['N_sigma'], bins=bins, color='skyblue', alpha=0.7, edgecolor='black')
+        plt.xlabel(r'$N_\sigma$')
+        plt.ylabel('Number of galaxies')
+        plt.title(rf'$N_\sigma$ distribution for {f}')
+        plt.xlim(x_min, x_max)
+        plt.tight_layout()
+        
+        # Save each histogram with the filter name
+        filename = os.path.join(out_dir, f'{f}_Nsigma.png')
+        plt.savefig(filename, dpi=300)
+        plt.show()
+        plt.close()
+    
+
+
+    # Plot histograms for galaxies    
+    galaxies = df['galaxy_id'].unique()
+
+    x_min, x_max = df['N_sigma'].min(), df['N_sigma'].max()
+    
+    for gal in galaxies:
+        subset = df[df['galaxy_id'] == gal]
+        
+        plt.figure(figsize=(6, 4))
+        plt.hist(subset['N_sigma'], bins=25, color='skyblue', alpha=0.7, range=(x_min, x_max))
+        plt.xlim(0, x_max)        
+        plt.title(r'$N_\sigma$ Distribution - ' + f'{gal}')
+        plt.xlabel(r'$N_\sigma$')    
+        plt.ylabel('Number of galaxies')
+        plt.tight_layout()
+        
+        os.makedirs(out_dir, exist_ok=True)
+        filename = os.path.join(out_dir, f'{gal}_Nsigma.png')
+        plt.savefig(filename)
+        plt.close()
+        print(f"✅ Saved histogram for galaxy {gal} to {filename}")
+
+    return

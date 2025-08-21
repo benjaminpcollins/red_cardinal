@@ -158,13 +158,26 @@ def build_obs(objid):
     obs['maggies_all'] = np.array(fluxes_all) / 3631
     obs['maggies_unc_all'] = np.array(fluxes_err_all) / 3631
     
-    # Make mask, where True means that you want to fit that data point
-    obs['phot_mask'] = np.array([True for f in obs["filters"]])
-    obs['phot_mask_all'] = np.array([True for f in obs["filters_all"]])
+    # Build masks (HST+NIRCam only vs all including MIRI)
+    valid = np.isfinite(obs['maggies']) & np.isfinite(obs['maggies_unc']) & \
+                        (obs['maggies'] > 0) & (obs['maggies_unc'] > 0)
+
+    valid_all = np.isfinite(obs['maggies_all']) & np.isfinite(obs['maggies_unc_all']) & \
+                        (obs['maggies_all'] > 0) & (obs['maggies_unc_all'] > 0)
     
-    # Array of effective wavelengths for each filter, useful for plotting
-    obs['phot_wave'] = np.array([f.wave_effective for f in obs['filters']])
-    obs['phot_wave_all'] = np.array([f.wave_effective for f in obs['filters_all']])
+    obs['valid_mask'] = valid
+    obs['valid_mask_all'] = valid_all
+    
+    # Filter out invalid entries everywhere
+    obs['maggies']     = obs['maggies'][valid]
+    obs['maggies_unc'] = obs['maggies_unc'][valid]
+    obs['phot_wave']   = np.array([f.wave_effective for f, m in zip(obs['filters'], valid) if m])
+    obs['filters']     = [f for f, m in zip(obs['filters'], valid) if m]
+
+    obs['maggies_all']     = obs['maggies_all'][valid_all]
+    obs['maggies_unc_all'] = obs['maggies_unc_all'][valid_all]
+    obs['phot_wave_all']   = np.array([f.wave_effective for f, m in zip(obs['filters_all'], valid_all) if m])
+    obs['filters_all']     = [f for f, m in zip(obs['filters_all'], valid_all) if m]
     
     # ensure all required keys are present in the obs dictionary
     obs = fix_obs(obs)
@@ -215,9 +228,6 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     :returns model:
         An instance of prospect.models.SedModel
     """    
-    
-    print("zred: ", zred)
-    print("waverange: ", waverange)
     
     # continuity SFH
     model_params = TemplateLibrary["continuity_sfh"]
