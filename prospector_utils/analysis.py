@@ -148,7 +148,7 @@ def compute_residuals(objid, show_plot=True):
     delta = np.abs(obs_flux - model_flux)
     
     # Compute it also in percentage of observed MIRI flux
-    perc = 100 * delta / obs_flux
+    perc = delta / obs_flux
     
     tot_err = np.sqrt(model_err**2 + obs_err**2)
     N_sigma = delta / tot_err

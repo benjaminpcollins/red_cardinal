@@ -385,7 +385,9 @@ def load_and_display(objid, mod=None, mod_err=None):
         mod_err = np.full_like(mod, mod_err)  # Ensure phot_err is the same length as phot
                 
         ax.errorbar(wave_phot_all, mod*factor, yerr=mod_err*factor, fmt='d', color='blue', label='Model photometry (Sedpy)', markersize=6)
-    
+        plot_dir = "/Users/benjamincollins/University/Master/Red_Cardinal/prospector/fits/"
+        os.makedirs(plot_dir, exist_ok=True)
+        filename = os.path.join(plot_dir, f"{objid}.png")
     
     # Plot measured photometry
     plot_photometry(ax, obs)
@@ -416,6 +418,9 @@ def load_and_display(objid, mod=None, mod_err=None):
     ax.legend()
     
     plt.tight_layout()
+    if filename:
+        plt.savefig(filename)
+        print(f"✅ Plot saved to {filename}")
     plt.show()
     
     
@@ -441,6 +446,39 @@ def create_hist(csv_path, out_dir, bins=25):
 
     filters = df['filter_name'].unique()
 
+    # Example: sort filters by central wavelength
+    # (replace this mapping with your actual filters & λ)
+    filter_wavelengths = {
+        'jwst_f770w': 7.7,
+        'jwst_f1000w': 10.0,
+        'jwst_f1800w': 18.0,
+        'jwst_f2100w': 21.0,
+    }
+
+    # Sort filter names by wavelength
+    filters_sorted = sorted(filters,
+                            key=lambda f: filter_wavelengths.get(f, np.inf))
+
+    # Make a 2x2 grid
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True, sharey=True)
+    axes = axes.flatten()  # easier to index
+
+    for ax, f in zip(axes, filters_sorted):
+        subset = df[df['filter_name'] == f]
+        ax.hist(subset['N_sigma'], bins=bins, color='skyblue', alpha=0.7, edgecolor='black')
+        ax.set_title(f'{f}')
+        ax.set_xlim(x_min, x_max)
+        ax.set_xlabel(r'$N_\sigma$')
+        ax.set_ylabel('Number of galaxies')
+
+    #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    # Save single combined figure
+    filename = os.path.join(out_dir, 'Nsigma_all_filters.png')
+    plt.savefig(filename, dpi=300)
+    plt.show()
+    
     for f in filters:
         subset = df[df['filter_name'] == f]
 
@@ -458,8 +496,6 @@ def create_hist(csv_path, out_dir, bins=25):
         plt.show()
         plt.close()
     
-
-
     # Plot histograms for galaxies    
     galaxies = df['galaxy_id'].unique()
 
@@ -469,17 +505,87 @@ def create_hist(csv_path, out_dir, bins=25):
         subset = df[df['galaxy_id'] == gal]
         
         plt.figure(figsize=(6, 4))
-        plt.hist(subset['N_sigma'], bins=25, color='skyblue', alpha=0.7, range=(x_min, x_max))
+        plt.hist(subset['N_sigma'], bins=25, color='skyblue', alpha=0.7, range=(x_min, x_max), edgecolor='black')
         plt.xlim(0, x_max)        
         plt.title(r'$N_\sigma$ Distribution - ' + f'{gal}')
         plt.xlabel(r'$N_\sigma$')    
-        plt.ylabel('Number of galaxies')
+        plt.ylabel('Number of bands')
         plt.tight_layout()
         
         os.makedirs(out_dir, exist_ok=True)
         filename = os.path.join(out_dir, f'{gal}_Nsigma.png')
-        plt.savefig(filename)
+        plt.savefig(filename, dpi=300)
         plt.close()
         print(f"✅ Saved histogram for galaxy {gal} to {filename}")
+
+
+    # Compute reduced chi^2 per galaxy
+    reduced_chi2 = []
+
+    for gal in df['galaxy_id'].unique():
+        subset = df[df['galaxy_id'] == gal]
+        n_filters = len(subset)
+        if n_filters > 0:
+            chi2 = np.sum(subset['N_sigma']**2) / n_filters           
+            reduced_chi2.append({'galaxy_id': gal, 'reduced_chi2': chi2})
+
+    chi2_df = pd.DataFrame(reduced_chi2)
+
+    # Plot histogram of reduced chi^2
+    plt.figure(figsize=(6,4))
+    plt.hist(chi2_df['reduced_chi2'], bins=25, color='salmon', alpha=0.7, edgecolor='black', range=(0, chi2_df['reduced_chi2'].quantile(0.95)))
+    plt.xlabel(r'Reduced $\chi^2$')
+    plt.ylabel('Number of galaxies')
+    plt.title(r'Reduced $\chi^2$ distribution')
+    plt.tight_layout()
+    filename = os.path.join(out_dir, 'reduced_chi2_hist_cropped.png')
+    plt.savefig(filename, dpi=300)
+    plt.show()
+    
+    chi2_df['n_filters'] = chi2_df['galaxy_id'].apply(
+    lambda g: len(df[df['galaxy_id'] == g])
+    )
+
+    # Compute 95th percentile of reduced chi^2
+    q95 = chi2_df['reduced_chi2'].quantile(0.95)
+
+    # Filter out galaxies above this threshold
+    filtered = chi2_df[chi2_df['reduced_chi2'] <= q95]
+
+    # Scatter plot with filtered data
+    plt.scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
+    plt.xlabel('Number of photometric data points')
+    plt.ylabel(r'Reduced $\chi^2$')
+    plt.title(r'Reduced $\chi^2$ vs. number of MIRI bands')
+    plt.axhline(1, color='red', linestyle='--')
+    filename = os.path.join(out_dir, 'reduced_chi2_vs_npoints_cropped.png')
+    plt.savefig(filename, dpi=300)
+    plt.show()
+
+    # Compute average fractional discrepancy per galaxy
+    frac_disc = (
+        df.groupby('galaxy_id')['perc_diff']
+        .mean()
+        .reset_index()
+        .rename(columns={'perc_diff': 'mean_frac_diff'})
+    )
+
+    # Merge with chi2_df
+    chi2_df = chi2_df.merge(frac_disc, on='galaxy_id', how='left')
+
+    # Move n_filters to the last column explicitly
+    cols = [c for c in chi2_df.columns if c != 'n_filters'] + ['n_filters']
+    chi2_df = chi2_df[cols]
+    
+    # Sort by reduced_chi2 (ascending = best fit first)
+    chi2_df_sorted = chi2_df.sort_values('reduced_chi2', ascending=True).reset_index(drop=True)
+
+    # Save to CSV
+    analysis_dir = "/Users/benjamincollins/University/Master/Red_Cardinal/prospector/analysis/"
+    filename = os.path.join(analysis_dir, 'fit_quality.csv')
+    chi2_df_sorted.to_csv(filename, index=False)
+
+    print(f"Saved ranked fit quality table to {filename}")
+    print(chi2_df_sorted.head(10))  # quick preview
 
     return
