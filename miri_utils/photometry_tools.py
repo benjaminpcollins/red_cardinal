@@ -43,6 +43,7 @@ import json
 import matplotlib.pyplot as plt
 import astropy.units as u
 import matplotlib.colors as mcolors
+import pickle as pkl
 
 from PIL import Image
 from matplotlib.patches import Ellipse
@@ -62,10 +63,10 @@ from .cutout_tools import load_cutout
 warnings.simplefilter("ignore", category=FITSFixedWarning)
 
 
-def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='masks', save_plot=False):
+def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder=None, rescale=True):
     
     # --- Load the FITS table ---
-    table_path =  '/Users/benjamincollins/University/master/Red_Cardinal/catalogues/Flux_Aperture_PSFMatched_AperCorr_old.fits'
+    table_path =  '/Users/benjamincollins/University/master/Red_Cardinal/photometry/phot_tables/Flux_Aperture_PSFMatched_AperCorr_old.fits'
     aperture_table = Table.read(table_path)
     #table_path =  '/Users/benjamincollins/University/master/Red_Cardinal/catalogues/aperture_table.csv'
     #df = pd.read_csv(table_path)
@@ -111,22 +112,25 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='
     ### Additional rescaling of the NIRCam apertures ###
     ####################################################
     
-    if int(galaxy_id) == 12332:
-        scale_factor *= 1.0 # no additional scaling to avoid contaminating source
-    elif int(galaxy_id) in [7136, 7904, 7922, 11136, 16419, 21452]:
-        scale_factor *= 1.6
-    elif int(galaxy_id) in [7934, 10314, 10592, 18332]:
-        scale_factor *= 1.8
+    if rescale == True:
+        if int(galaxy_id) == 12332:
+            scale_factor *= 1.0 # no additional scaling to avoid contaminating source
+        elif int(galaxy_id) in [7136, 7904, 7922, 11136, 16419, 21452]:
+            scale_factor *= 1.6
+        elif int(galaxy_id) in [7934, 10314, 10592, 18332]:
+            scale_factor *= 1.8
+        else:
+            scale_factor *= 2.0
     else:
-        scale_factor *= 2.0
-    
+        scale_factor *= 1.0   # no rescaling, use original aperture sizes
+        
     # --- Specify parameters for the ellipse ---
     width = row['Apr_A'] * scale_factor
     height = row['Apr_B'] * scale_factor
     theta = -row['Apr_Theta']
     theta_new = ((theta - angle) % 180) * u.deg
     
-    if save_plot:
+    if mask_folder:
         # --- Clean and prepare the MIRI data for plotting ---
         miri_clean = np.copy(miri_data)
         finite_vals = miri_clean[np.isfinite(miri_clean)].flatten()
@@ -199,7 +203,7 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder='
 
 
 
-def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma_val):
+def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sigma_val, rescale=True):
     """
     Estimate background using a global 2D plane fit, then extract statistics from 
     an elliptical annulus.
@@ -295,6 +299,32 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     # Define the background region
     region_name = "Annulus"
     
+    # Optional block for rescaling apertures such that the annuli are consistent
+    # ==========================================    
+    if rescale:
+        # --- Create elliptical region in MIRI pixel space ---
+        nircam_scale = 0.03    # arcsec/pixel
+        miri_scale = 0.11092  # arcsec per pixel
+        
+        # arcsec/pixel
+        scale_factor = nircam_scale / miri_scale
+        
+        if int(galaxy_id) == 12332:
+                scale_factor *= 1.0 # no additional scaling to avoid contaminating source
+        elif int(galaxy_id) in [7136, 7904, 7922, 11136, 16419, 21452]:
+            scale_factor *= 1.6
+        elif int(galaxy_id) in [7934, 10314, 10592, 18332]:
+            scale_factor *= 1.8
+        else:
+            scale_factor *= 2.0
+    else:
+        scale_factor = 1.0
+        
+    a *= scale_factor
+    b *= scale_factor
+    # ==========================================
+    
+    # Define inner and outer radii for the annulus 
     a_in = a + 8
     b_in = b + 8
     
@@ -366,7 +396,7 @@ def estimate_background(galaxy_id, filter_name, image_data, aperture_params, sig
     }
     
     # Save visualisation data to .h5 file
-    vis_dir = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/vis_data'
+    vis_dir = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/vis_data_small'
     os.makedirs(vis_dir, exist_ok=True)
     
     vis_path = os.path.join(vis_dir, f'{galaxy_id}_{filter_name}.h5')
@@ -412,8 +442,9 @@ def save_vis(vis_data, filename):
             f.attrs['aperture_params'] = json.dumps(vis_data['aperture_params'])
         
         # Add metadata
-        f.attrs['created_date'] = np.string_(str(np.datetime64('now')))
-        f.attrs['data_type'] = np.string_('galaxy_visualization_data')
+        f.attrs['created_date'] = str(np.datetime64('now'))
+        f.attrs['data_type'] = 'galaxy_visualisation_data'
+
 
 def load_vis(filename):
     """
@@ -1407,7 +1438,7 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, detections=None,
     plt.show()
 
 
-def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summary_doc_path, scaling=None):
+def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None, summary_doc_path=None, scaling=None):
     """
     Compare and contrast two photometric tables WITHOUT APERTURE CORRECTION APPLIED
     and create a comprehensive summary plot of all important statistics and write
@@ -1435,10 +1466,6 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
     plt.style.use('default')
     sns.set_palette("husl")
 
-    # Load the two tables
-    table_small_path = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/results/Flux_SmallAperture_NoCorr_MIRI.fits'
-    table_big_path = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/results/Flux_BigAperture_NoCorr_MIRI.fits'
-
     table_small = Table.read(table_small_path)
     table_big = Table.read(table_big_path)
 
@@ -1451,7 +1478,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
     print(f"Found {len(common_ids)} common galaxies")
 
     # Prepare data structures
-    bands = ['F770W', 'F1800W']
+    bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
     data_comparison = {
         'ID': [],
         'Band': [],
@@ -1468,7 +1495,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
     }
 
     # Collect all data for comprehensive analysis
-    for idx, band in enumerate([0, 1]):  # F770W = 0, F1800W = 1
+    for idx, band in enumerate(bands):  # bands = ["F770W", "F1000W", "F1800W", "F2100W"]
         for gid in common_ids:
             i1 = ids1.index(gid)
             i2 = ids2.index(gid)
@@ -1492,7 +1519,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
             
             # Store all data
             data_comparison['ID'].append(gid)
-            data_comparison['Band'].append(bands[idx])
+            data_comparison['Band'].append(band)            
             data_comparison['Flux_Small_Raw'].append(flux_small)
             data_comparison['Flux_Big_Raw'].append(flux_big)
             data_comparison['Flux_Small_Corrected'].append(flux_small_corr)
@@ -1504,6 +1531,22 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
             data_comparison['Flux_Difference'].append(flux_big - flux_small)
             data_comparison['Corrected_Flux_Difference'].append(flux_big_corr - flux_small_corr)
 
+    filename = os.path.join("/Users/benjamincollins/University/Master/Red_Cardinal/photometry/apertures/aperture_comparisons/comparison_data.pkl")    
+    # Write output to a pickle file
+    with open(filename, 'wb') as f:
+        pkl.dump(data_comparison, f)
+    
+    if fig_path:
+        plot_aperture_comparison(data_comparison, fig_path, scaling)
+        print(f'Saved output plot to {fig_path}')
+        
+    if summary_doc_path:
+        write_aperture_summary(data_comparison, common_ids, summary_doc_path)
+
+
+
+def plot_aperture_comparison(data_comparison, fig_path, scaling=None):
+    
     # Convert to arrays for easier handling
     for key in data_comparison:
         data_comparison[key] = np.array(data_comparison[key])
@@ -1511,6 +1554,8 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
     # Create comprehensive comparison plots
     fig = plt.figure(figsize=(20, 16))
 
+    bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+    
     # 1. Raw vs Corrected Flux Comparison (Scatter plots)
     for i, band in enumerate(bands):
         mask = data_comparison['Band'] == band
@@ -1679,6 +1724,12 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path, summ
     plt.show()
     plt.close()
 
+
+
+def write_aperture_summary(data_comparison, common_ids, summary_doc_path):
+    
+    bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+    
     with open(summary_doc_path, "w") as file:
         file.write("\n" + "="*80 + "\n")
         file.write("COMPREHENSIVE APERTURE COMPARISON SUMMARY\n")
