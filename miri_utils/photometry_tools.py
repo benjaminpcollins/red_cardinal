@@ -40,6 +40,7 @@ import numpy as np
 import pandas as pd
 import warnings
 import json
+import random
 import matplotlib.pyplot as plt
 import astropy.units as u
 import matplotlib.colors as mcolors
@@ -55,7 +56,6 @@ from photutils.aperture import EllipticalAperture, EllipticalAnnulus, aperture_p
 from photutils.segmentation import detect_sources, SegmentationImage
 from photutils.centroids import centroid_com
 from collections import defaultdict
-
 
 from .cutout_tools import load_cutout
 
@@ -1077,6 +1077,7 @@ def create_fits_table_from_csv(csv_paths, output_file):
         
     # Check that at least one CSV file exists
     valid_csvs = [(path, f) for path, f in zip(csv_paths, filters) if path and os.path.exists(path)]
+    
     if not valid_csvs:
         raise ValueError("At least one valid CSV file is required.")
 
@@ -1095,6 +1096,10 @@ def create_fits_table_from_csv(csv_paths, output_file):
     # Sort and convert to list
     galaxy_ids = sorted(all_ids)
     print(f"Found {len(galaxy_ids)} unique galaxy IDs across all filters")
+    
+    #faulty_ids = [12332, 7136, 7904, 7922, 11136, 16419, 21452, 7934, 10314, 10592, 18332]
+    #galaxy_ids = [gid for gid in galaxy_ids if gid not in faulty_ids]
+    #print(f"Excluding {len(faulty_ids)} faulty IDs, leaving {len(galaxy_ids)} valid galaxy IDs for photometric analysis")
     
     # Initialize table
     table = Table()
@@ -1470,11 +1475,11 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None,
     table_big = Table.read(table_big_path)
 
     # Convert ID columns to string for alignment
-    ids1 = [id.decode() if isinstance(id, bytes) else str(id) for id in table_small['ID']]
-    ids2 = [id.decode() if isinstance(id, bytes) else str(id) for id in table_big['ID']]
+    ids_small = [id.decode() if isinstance(id, bytes) else str(id) for id in table_small['ID']]
+    ids_big = [id.decode() if isinstance(id, bytes) else str(id) for id in table_big['ID']]
 
     # Match common IDs
-    common_ids = sorted(set(ids1) & set(ids2))
+    common_ids = sorted(set(ids_small) & set(ids_big))
     print(f"Found {len(common_ids)} common galaxies")
 
     # Prepare data structures
@@ -1484,8 +1489,12 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None,
         'Band': [],
         'Flux_Small_Raw': [],
         'Flux_Big_Raw': [],
+        'Flux_Err_Small_Raw': [],
+        'Flux_Big_Raw_Err': [],
         'Flux_Small_Corrected': [],
         'Flux_Big_Corrected': [],
+        'Flux_Err_Small_Corrected': [],
+        'Flux_Big_Corrected_Err': [],
         'Apr_Corr_Small': [],
         'Apr_Corr_Big': [],
         'Flux_Ratio': [],
@@ -1496,34 +1505,45 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None,
 
     # Collect all data for comprehensive analysis
     for idx, band in enumerate(bands):  # bands = ["F770W", "F1000W", "F1800W", "F2100W"]
+
         for gid in common_ids:
-            i1 = ids1.index(gid)
-            i2 = ids2.index(gid)
+            index_s = ids_small.index(gid)
+            index_b = ids_big.index(gid)
 
             # Raw fluxes (convert to µJy)
-            flux_small = table_small['Flux'][i1][idx] * 1e6
-            flux_big = table_big['Flux'][i2][idx] * 1e6
+            flux_small = table_small['Flux'][index_s][idx] * 1e6
+            flux_big = table_big['Flux'][index_b][idx] * 1e6
+            flux_err_small = table_small['Flux_Err'][index_s][idx] * 1e6
+            flux_err_big = table_big['Flux_Err'][index_b][idx] * 1e6
             
             # Aperture corrections
-            corr_small = table_small['Apr_Corr'][i1][idx] if 'Apr_Corr' in table_small.colnames else np.nan
-            corr_big = table_big['Apr_Corr'][i2][idx] if 'Apr_Corr' in table_big.colnames else np.nan
+            corr_small = table_small['Apr_Corr'][index_s][idx] if 'Apr_Corr' in table_small.colnames else np.nan
+            corr_big = table_big['Apr_Corr'][index_b][idx] if 'Apr_Corr' in table_big.colnames else np.nan
             
             # Skip if any crucial value is invalid
-            if not (np.isfinite(flux_small) and np.isfinite(flux_big) and 
+            if not (np.isfinite(flux_small) and np.isfinite(flux_big) and
+                    (flux_small > 0) and (flux_big > 0) and
+                    np.isfinite(flux_err_small) and np.isfinite(flux_err_big) and
                     np.isfinite(corr_small) and np.isfinite(corr_big)):
                 continue
                 
             # Calculate corrected fluxes
             flux_small_corr = flux_small * corr_small
             flux_big_corr = flux_big * corr_big
+            flux_err_small_corr = flux_err_small * corr_small
+            flux_err_big_corr = flux_err_big * corr_big
             
             # Store all data
             data_comparison['ID'].append(gid)
             data_comparison['Band'].append(band)            
             data_comparison['Flux_Small_Raw'].append(flux_small)
             data_comparison['Flux_Big_Raw'].append(flux_big)
+            data_comparison['Flux_Err_Small_Raw'].append(flux_err_small)
+            data_comparison['Flux_Big_Raw_Err'].append(flux_err_big)
             data_comparison['Flux_Small_Corrected'].append(flux_small_corr)
             data_comparison['Flux_Big_Corrected'].append(flux_big_corr)
+            data_comparison['Flux_Err_Small_Corrected'].append(flux_err_small_corr)
+            data_comparison['Flux_Big_Corrected_Err'].append(flux_err_big_corr)
             data_comparison['Apr_Corr_Small'].append(corr_small)
             data_comparison['Apr_Corr_Big'].append(corr_big)
             data_comparison['Flux_Ratio'].append(flux_big / flux_small)
@@ -1532,17 +1552,18 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None,
             data_comparison['Corrected_Flux_Difference'].append(flux_big_corr - flux_small_corr)
 
     filename = os.path.join("/Users/benjamincollins/University/Master/Red_Cardinal/photometry/apertures/aperture_comparisons/comparison_data.pkl")    
+    
     # Write output to a pickle file
     with open(filename, 'wb') as f:
         pkl.dump(data_comparison, f)
-    
+        print(f'Saved pickle file to {filename}')
+        
     if fig_path:
         plot_aperture_comparison(data_comparison, fig_path, scaling)
         print(f'Saved output plot to {fig_path}')
         
     if summary_doc_path:
         write_aperture_summary(data_comparison, common_ids, summary_doc_path)
-
 
 
 def plot_aperture_comparison(data_comparison, fig_path, scaling=None):
@@ -1723,65 +1744,568 @@ def plot_aperture_comparison(data_comparison, fig_path, scaling=None):
     plt.savefig(fig_path, dpi=150)
     plt.show()
     plt.close()
+    
+def plot_aperture_summary(data_comparison, scaling=False):
+    
+    fig_path = '/Users/benjamincollins/University/Master/Red_Cardinal/photometry/apertures/aperture_comparisons/'
+    
+    # Convert to arrays
+    for key in data_comparison:
+        data_comparison[key] = np.array(data_comparison[key])
+
+    bands = ['F770W', 'F1800W']
+    colors = ['#1f77b4', '#ff7f0e']  # Distinct colors per band
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    
+    for i, band in enumerate(bands):
+        mask = data_comparison['Band'] == band
+        
+        # --- (1) Corrected Flux Scatter ---
+        ax = axes[i, 0]
+        ax.scatter(data_comparison['Flux_Small_Corrected'][mask],
+                   data_comparison['Flux_Big_Corrected'][mask],
+                   alpha=0.7, s=30, color=colors[i])
+        
+        # 1:1 line
+        min_flux = min(np.min(data_comparison['Flux_Small_Corrected'][mask]),
+                       np.min(data_comparison['Flux_Big_Corrected'][mask]))
+        max_flux = max(np.max(data_comparison['Flux_Small_Corrected'][mask]),
+                       np.max(data_comparison['Flux_Big_Corrected'][mask]))
+        ax.plot([min_flux, max_flux], [min_flux, max_flux], 'k--', alpha=0.8, label='1:1')
+        if scaling: ax.set_xscale('log'); ax.set_yscale('log')
+        ax.set_xlabel(f'Corrected Flux small [µJy]')
+        ax.set_ylabel(f'Corrected Flux large [µJy]')
+        ax.set_title(f'{band} Corrected Flux Comparison')
+        ax.legend()
+        ax.grid(alpha=0.3)
+        
+        # Calculate and display R² correlation
+        corr_diff = data_comparison['Corrected_Flux_Difference'][mask]
+        flux_small = data_comparison['Flux_Small_Corrected'][mask]
+        frac_diff = corr_diff / flux_small
+        #ax.text(0.05, 0.9, f"median = {np.median(frac_diff):.3f}" + "\n" + rf"$\sigma$ = {np.std(frac_diff):.3f}", 
+         #       transform=ax.transAxes, fontsize=10,
+          #      bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+
+        # --- (2) Corrected Flux Ratio Histogram ---
+        ax = axes[i, 1]
+
+        # Convert masked data to a NumPy array
+        ratios = np.array(data_comparison['Corrected_Flux_Ratio'][mask])
+
+        # Define histogram cutoff at 95th percentile
+        cutoff = np.percentile(ratios, 95)
+        ratios_clipped = ratios[ratios <= cutoff]
+
+        #if i == 1: ratios = ratios[ratios < 3.0]
+        
+        # Plot histogram
+        ax.hist(ratios_clipped, bins=25,
+                alpha=0.7, color=colors[i], edgecolor='black',
+                range=(0, 3.0))
+
+        # Reference lines
+        ax.axvline(1.0, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+        ax.axvline(np.median(ratios), color='darkred', linestyle='-', linewidth=1.5)
+
+        # Add compact statistics
+        mean_ratio = np.mean(ratios)
+        std_ratio = np.std(ratios)
+        num = f'N = {len(ratios_clipped)} (95th pct of {len(ratios)})'
+        median_ratio = np.median(ratios)
+        
+        stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
+            
+        ax.text(0.65, 0.77, stats_text, transform=ax.transAxes, fontsize=10,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+
+        # Annotate number of sources
+        #ax.text(0.95, 0.95,
+        #        f"N = {len(ratios_clipped)} (95th pct of {len(ratios)})",
+        #        ha='right', va='top',
+        #        transform=ax.transAxes,
+        #        fontsize=10,
+        #        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
+
+        # Labels and formatting
+        ax.set_xlabel('Corrected Flux Ratio (Large/Small)')
+        ax.set_ylabel('Number of Sources')
+        ax.set_title(f'{band} Corrected Flux Ratio Distribution')
+        ax.legend()
+        ax.grid(alpha=0.3)
 
 
+    #plt.suptitle('Aperture Photometry Comparison: Short vs Long λ', fontsize=16, y=0.98)
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.92)
+    figname = os.path.join(fig_path, 'new_stats_thesis_v2.png')
+    plt.savefig(figname, dpi=200, bbox_inches='tight')
+    plt.show()
+    plt.close()
+    print(f'Saved summary plot to {figname}')
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    
+    for i, band in enumerate(bands):
+        mask = data_comparison['Band'] == band
+        ax = axes[i]
+
+        sc = ax.scatter(
+            data_comparison['Flux_Small_Corrected'][mask],
+            data_comparison['Corrected_Flux_Ratio'][mask],
+            alpha=0.6, s=30,
+            c=data_comparison['Apr_Corr_Big'][mask],
+            cmap='viridis'
+        )
+
+        # Proper colorbar
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label('Large Aperture Correction')
+
+        ax.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')
+        if scaling:
+            ax.set_xscale('log')
+        ax.set_ylim(0,7.5)
+        ax.set_xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
+        ax.set_ylabel('Flux Ratio (Large/Small)')
+        ax.set_title(f'{band} Flux Ratio vs Brightness')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+
+    figname = os.path.join(fig_path, 'ratio_vs_brightness.png')
+    plt.savefig(figname, bbox_inches="tight", pad_inches=0)
+    plt.tight_layout()
+    plt.show()
+    print(f'Saved scatter plot to {figname}')
+    
+    
 
 def write_aperture_summary(data_comparison, common_ids, summary_doc_path):
+    """
+    Write a comprehensive aperture comparison summary to a text file.
+    Includes raw ratios, aperture corrections, corrected differences,
+    fractional differences, and context relative to measurement errors.
+    """
+
+    doc_path = os.path.join('/Users/benjamincollins/University/Master/Red_Cardinal/photometry/apertures/aperture_comparisons', summary_doc_path)
+    
+    df = pd.DataFrame(data_comparison)
+    print("Bands in table:", np.unique(data_comparison['Band']))
     
     bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
-    
-    with open(summary_doc_path, "w") as file:
+
+    with open(doc_path, "w") as file:
         file.write("\n" + "="*80 + "\n")
         file.write("COMPREHENSIVE APERTURE COMPARISON SUMMARY\n")
         file.write("="*80 + "\n")
-        
+
         for band in bands:
-            mask = data_comparison['Band'] == band
-            file.write(f"\n📊 {band} FILTER:\n")
+            
+            band_data = df[df['Band'] == band]
+
+            file.write(f"\n{band} FILTER:\n")
             file.write("-" * 40 + "\n")
-            
-            # Raw flux statistics
-            flux_ratio_med = np.median(data_comparison['Flux_Ratio'][mask])
-            flux_ratio_mean = np.mean(data_comparison['Flux_Ratio'][mask])
-            flux_ratio_std = np.std(data_comparison['Flux_Ratio'][mask])
-            
+
+            # --- Raw flux ratios ---
+            flux_ratio = band_data['Flux_Ratio']
             file.write("Raw Flux Ratios (Large/Small):\n")
-            file.write(f"  Median: {flux_ratio_med:.3f} ± {flux_ratio_std:.3f}\n")
-            file.write(f"  Mean:   {flux_ratio_mean:.3f}\n")
-            file.write(f"  Range:  {np.min(data_comparison['Flux_Ratio'][mask]):.3f} - {np.max(data_comparison['Flux_Ratio'][mask]):.3f}\n")
-            
-            # Corrected flux statistics
-            corr_ratio_med = np.median(data_comparison['Corrected_Flux_Ratio'][mask])
-            corr_ratio_mean = np.mean(data_comparison['Corrected_Flux_Ratio'][mask])
-            corr_ratio_std = np.std(data_comparison['Corrected_Flux_Ratio'][mask])
-            
+            file.write(f"  Median: {np.median(flux_ratio):.3f} ± {np.std(flux_ratio):.3f}\n")
+            file.write(f"  Mean:   {np.mean(flux_ratio):.3f}\n")
+            file.write(f"  Range:  {np.min(flux_ratio):.3f} – {np.max(flux_ratio):.3f}\n")
+
+            # --- Corrected flux ratios ---
+            corr_ratio = band_data['Corrected_Flux_Ratio']
             file.write("\nCorrected Flux Ratios (Large/Small):\n")
-            file.write(f"  Median: {corr_ratio_med:.3f} ± {corr_ratio_std:.3f}\n")
-            file.write(f"  Mean:   {corr_ratio_mean:.3f}\n")
-            file.write(f"  Range:  {np.min(data_comparison['Corrected_Flux_Ratio'][mask]):.3f} - {np.max(data_comparison['Corrected_Flux_Ratio'][mask]):.3f}\n")
+            file.write(f"  Median: {np.median(corr_ratio):.3f} ± {np.std(corr_ratio):.3f}\n")
+            file.write(f"  Mean:   {np.mean(corr_ratio):.3f}\n")
+            file.write(f"  Range:  {np.min(corr_ratio):.3f} – {np.max(corr_ratio):.3f}\n")
             
-            # Aperture correction comparison
-            small_corr_med = np.median(data_comparison['Apr_Corr_Small'][mask])
-            big_corr_med = np.median(data_comparison['Apr_Corr_Big'][mask])
-            
+            # --- Calculate bias reduction ---
+            raw_bias = np.median(flux_ratio) - 1.0
+            corrected_bias = np.median(corr_ratio) - 1.0
+            bias_reduction = (raw_bias - corrected_bias) / raw_bias * 100
+
+            file.write(f"\nBias Reduction:\n")
+            file.write(f"  Initial systematic bias: {raw_bias*100:.1f}%\n")
+            file.write(f"  Residual systematic bias: {corrected_bias*100:.1f}%\n")
+            file.write(f"  Bias reduction achieved: {bias_reduction:.1f}%\n")
+
+            # --- Aperture corrections ---
             file.write("\nAperture Corrections:\n")
+            small_corr_med = np.median(band_data['Apr_Corr_Small'])
+            big_corr_med   = np.median(band_data['Apr_Corr_Big'])
+            small_sigma_corr = np.std(band_data['Apr_Corr_Small'])
+            big_sigma_corr = np.std(band_data['Apr_Corr_Big'])
             file.write(f"  Small aperture median: {small_corr_med:.3f}\n")
             file.write(f"  Large aperture median: {big_corr_med:.3f}\n")
-            file.write(f"  Difference (Large-Small): {big_corr_med - small_corr_med:.3f}\n")
-            
-            # Final corrected flux differences
-            corr_diff_med = np.median(data_comparison['Corrected_Flux_Difference'][mask])
-            corr_diff_mean = np.mean(data_comparison['Corrected_Flux_Difference'][mask])
-            corr_diff_std = np.std(data_comparison['Corrected_Flux_Difference'][mask])
-            
-            file.write("\nFinal Corrected Flux Differences (Large - Small) [µJy]:\n")
-            file.write(f"  Median: {corr_diff_med:.2f} ± {corr_diff_std:.2f}\n")
-            file.write(f"  Mean:   {corr_diff_mean:.2f}\n")
-            
-            # Percentage of sources where large aperture gives higher flux
-            higher_flux_pct = np.sum(data_comparison['Corrected_Flux_Difference'][mask] > 0) / np.sum(mask) * 100
+            file.write(f"  Difference (Large–Small): {big_corr_med - small_corr_med:.3f}\n")
+
+            # --- Final corrected flux differences ---
+            corr_diff = band_data['Corrected_Flux_Difference']
+            file.write("\nFinal Corrected Flux Differences (Large – Small) [µJy]:\n")
+            file.write(f"  Median: {np.median(corr_diff):.2f} ± {np.std(corr_diff):.2f}\n")
+            file.write(f"  Mean:   {np.mean(corr_diff):.2f}\n")
+            higher_flux_pct = np.sum(corr_diff > 0) / len(corr_diff) * 100
             file.write(f"  Sources with higher flux in large aperture: {higher_flux_pct:.1f}%\n")
 
-        file.write(f"\nTotal sources analyzed: {len(common_ids)}\n")
+            # --- Fractional differences (preferred) ---
+            frac_diff = corr_diff / band_data['Flux_Small_Corrected']  # ΔFlux / Flux_small
+            frac_diff_pct = frac_diff * 100
+            file.write("\nFractional Differences ((Large – Small)/Small):\n")
+            file.write(f"  Median: {np.median(frac_diff_pct):.1f}% ± {np.std(frac_diff_pct):.1f}%\n")
+            file.write(f"  Range (5–95th pct): {np.percentile(frac_diff_pct,5):.1f}% – {np.percentile(frac_diff_pct,95):.1f}%\n")
+
+            # --- Compare to uncertainties ---
+            flux_small = band_data['Flux_Small_Corrected']
+            flux_err_small = np.median(band_data['Flux_Err_Small_Corrected'])
+            std_flux_err_small = np.std(band_data['Flux_Err_Small_Corrected'])               
+
+            # Propagated correction-induced uncertainty for each source
+            corr_err = np.sqrt((small_corr_med * flux_err_small)**2 +
+                            (flux_small * small_sigma_corr)**2)
+
+            # Median difference between large and small aperture corrected fluxes
+            median_corr_diff = np.median(band_data['Corrected_Flux_Difference'])
+
+            file.write("\nContext vs. Measurement Errors:\n")
+            file.write(f"  Median corrected aperture difference: {median_corr_diff:.2f} µJy\n")
+            file.write(f"  Median flux uncertainty: {flux_err_small:.2f} ± {std_flux_err_small:.2f} µJy\n")
+            file.write(f"  Median propagated uncertainty incl. correction: {np.median(corr_err):.2f} µJy\n")
+
+            if abs(median_corr_diff) < flux_err_small:
+                file.write("  → Aperture differences are smaller than typical measurement errors.\n")
+            else:
+                file.write("  → Aperture differences are comparable to or larger than typical measurement errors.\n")
+
+            # --- Compact interpretation line ---
+            file.write("\nSummary:\n")
+            file.write(f"  Corrected photometry converges across apertures, with residuals ≲{np.median(np.abs(frac_diff_pct)):.1f}%.\n")
+
+        # Final count
+        file.write(f"\nTotal sources analysed: {len(common_ids)}\n")
         file.write("="*80 + "\n")
+        print('Wrote summary document to', doc_path)
+
+
+
+
+
+def plot_appendix_figure(data_comparison, fig_path, scaling=None):
+    """
+    Create a compact summary plot for aperture photometry comparison.
+    Layout: 4 rows (one per band) × 3 columns
+    - Column 1: Corrected flux comparison (scatter)
+    - Column 2: Corrected flux ratio distribution (histogram)
+    - Column 3: Flux ratio vs brightness (scatter)
+    """
+    
+    # Convert to arrays for easier handling
+    for key in data_comparison:
+        data_comparison[key] = np.array(data_comparison[key])
+
+    # Create summary figure optimized for A4 appendix
+    fig = plt.figure(figsize=(12, 16))  # Good aspect ratio for A4
+    
+    bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+    colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']  # Distinct colors per band
+    
+    for i, band in enumerate(bands):
+        mask = data_comparison['Band'] == band
+        band_color = colors[i]
         
+        # Column 1: Corrected flux comparison
+        ax1 = plt.subplot(4, 3, i*3 + 1)
+        plt.scatter(data_comparison['Flux_Small_Corrected'][mask], 
+                   data_comparison['Flux_Big_Corrected'][mask], 
+                   alpha=0.6, s=20, color=band_color)
+        
+        # Add 1:1 line
+        min_flux = min(np.min(data_comparison['Flux_Small_Corrected'][mask]), 
+                      np.min(data_comparison['Flux_Big_Corrected'][mask]))
+        max_flux = max(np.max(data_comparison['Flux_Small_Corrected'][mask]), 
+                      np.max(data_comparison['Flux_Big_Corrected'][mask]))
+        plt.plot([min_flux, max_flux], [min_flux, max_flux], 'k--', alpha=0.7, linewidth=1)
+        
+        if scaling: plt.loglog()
+        plt.xlabel('Small Aperture [µJy]')
+        plt.ylabel('Large Aperture [µJy]')
+        plt.title(f'{band} Corrected Flux', fontsize=11)
+        plt.grid(True, alpha=0.3)
+        
+        # Calculate and display R² correlation
+        corr_coef = np.corrcoef(data_comparison['Flux_Small_Corrected'][mask], 
+                               data_comparison['Flux_Big_Corrected'][mask])[0, 1]
+        r_squared = corr_coef**2
+        plt.text(0.05, 0.9, f'R² = {r_squared:.3f}', 
+                transform=ax1.transAxes, fontsize=9,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        # Column 2: Corrected flux ratio distribution
+        ax2 = plt.subplot(4, 3, i*3 + 2)
+        n, bins, patches = plt.hist(data_comparison['Corrected_Flux_Ratio'][mask], 
+                                   bins=25, alpha=0.7, color=band_color, 
+                                   edgecolor='black', linewidth=0.5, range=(0,4))
+        
+        # Add vertical lines for key statistics
+        median_ratio = np.median(data_comparison['Corrected_Flux_Ratio'][mask])
+        plt.axvline(1.0, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+        plt.axvline(median_ratio, color='darkred', linestyle='-', linewidth=1.5)
+        
+        plt.xlabel('Flux Ratio (Large/Small)')
+        plt.ylabel('N Sources')
+        plt.title(f'{band} Ratio Distribution', fontsize=11)
+        plt.grid(True, alpha=0.3)
+        
+        # Add compact statistics
+        mean_ratio = np.mean(data_comparison['Corrected_Flux_Ratio'][mask])
+        std_ratio = np.std(data_comparison['Corrected_Flux_Ratio'][mask])
+        remark = '2 outliers > 4.0'
+        num = f'N = {len(data_comparison['Corrected_Flux_Ratio'][mask])}'
+        
+        if i == len(bands) - 2:
+            stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}\n{remark}'
+        else:
+            stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
+            
+        plt.text(0.95, 0.95, stats_text, transform=ax2.transAxes, fontsize=8,
+                verticalalignment='top', horizontalalignment='right')
+                #bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        # Column 3: Flux ratio vs brightness
+        ax3 = plt.subplot(4, 3, i*3 + 3)
+        scatter = plt.scatter(data_comparison['Flux_Small_Corrected'][mask], 
+                            data_comparison['Corrected_Flux_Ratio'][mask], 
+                            alpha=0.6, s=15, c=data_comparison['Apr_Corr_Small'][mask], 
+                            cmap='viridis', vmin=0.8, vmax=3.0)
+        
+        plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, linewidth=1.5)
+        plt.axhline(median_ratio, color='darkred', linestyle='-', alpha=0.8, linewidth=1)
+        
+        if scaling: plt.xscale('log')
+        plt.xlabel('Small Aperture Flux [µJy]')
+        plt.ylabel('Flux Ratio')
+        plt.title(f'{band} Ratio vs Brightness', fontsize=11)
+        plt.grid(True, alpha=0.3)
+        plt.ylim(0, 4)
+        
+        # Add colorbar only for the last band to save space
+        if i == len(bands) - 1:
+            cbar = plt.colorbar(scatter, ax=ax3, shrink=0.8)
+            cbar.set_label('Aperture Correction', fontsize=9)
+
+    # Overall title and layout adjustment
+    #plt.suptitle('Aperture Photometry Summary: Small vs Large Aperture Comparison', 
+                #fontsize=14, y=0.98)
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.94, hspace=0.35, wspace=0.3)
+        
+    # Save with high DPI for appendix quality
+    plt.savefig(fig_path, dpi=200, bbox_inches='tight', pad_inches=0)
+    plt.show()
+    plt.close()
+    
+
+def analyse_outliers(data_comparison, flags,
+                             ratio_col='Corrected_Flux_Ratio', 
+                             threshold=3.0, 
+                             summary=True):
+    """
+    Identify outliers where aperture corrections produced unphysical flux ratios.
+    
+    Parameters
+    ----------
+    data_comparison : dict, pd.DataFrame, or astropy Table
+        Must contain columns: 'ID', 'Band', and ratio_col (default: 'Corrected_Flux_Ratio').
+    ratio_col : str
+        Column name for corrected flux ratios to check (Large/Small).
+    threshold : float
+        Absolute deviation from unity considered "bad".
+        Example: threshold=3 → flags ratios < 1/3 or > 3.
+    summary : bool
+        If True, prints summary counts per filter.
+    
+    Returns
+    -------
+    outliers : pd.DataFrame
+        Subset of rows that are outliers.
+    """
+    
+    from astropy.visualization import ZScaleInterval, ImageNormalize, AsinhStretch
+            
+    # Convert to DataFrame if needed
+    if not isinstance(data_comparison, pd.DataFrame):
+        data = pd.DataFrame(data_comparison)
+    else:
+        data = data_comparison.copy()
+    
+    # Boolean mask: ratios too extreme
+    ratios = data[ratio_col].astype(float)
+    bad_mask = (ratios < 1/threshold) | (ratios > threshold) | ~np.isfinite(ratios)
+    
+    outliers = data[bad_mask]
+    
+    if summary:
+        print("=== Outlier Summary ===")
+        for band in outliers['Band'].unique():
+            count = np.sum(outliers['Band'] == band)
+            print(f"{band}: {count} flagged outliers")
+        print(f"Total outliers: {len(outliers)} / {len(data)} ({100*len(outliers)/len(data):.1f}%)")
+    
+    for obj in outliers.to_dict(orient='records'):
+        objid = obj['ID']
+        band = obj['Band']
+        ratio = obj[ratio_col]
+        
+        if int(objid) in flags.get(band, []):
+            print(f"⚠️ {objid} in {band} - known nondetection")
+        else:
+            print("This counts as a detection (apparently)")
+        
+        try:
+            vis_data = load_vis(f"/Users/benjamincollins/University/Master/Red_Cardinal/photometry/vis_data/{objid}_{band}.h5")
+        except:
+            print(f"❌ No VIS data found for {objid}")
+            continue
+        
+        img = vis_data["background_subtracted"]
+
+        # Normalisation: auto scale + asinh stretch
+        interval = ZScaleInterval()
+        vmin, vmax = interval.get_limits(img)
+        norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch())
+        
+        plt.figure(figsize=(4, 4))
+        plt.imshow(img, origin="lower", cmap="inferno", norm=norm)
+        plt.colorbar(label="Flux")
+        plt.title(f"Galaxy {objid} - {band}\nRatio = {ratio:.2f}")
+        plt.tight_layout()
+        plt.show()
+
+    return outliers
+
+
+
+def aperture_flux_at(img, aperture_params):
+    # aperture shape (scale only, will move centres + vary theta)
+    a = aperture_params['a']
+    b = aperture_params['b']
+    theta_ref = aperture_params['theta']
+    x0, y0 = aperture_params['x_center'], aperture_params['y_center']
+
+    aperture = EllipticalAperture((x0, y0), a, b, theta_ref)
+
+    phot = aperture_photometry(img, aperture, method='exact')
+    return phot['aperture_sum'][0]
+
+def empirical_aperture_rms(img, aperture_params, n_random=200):
+    """
+    Estimate RMS by placing random elliptical apertures on the image.
+    
+    Parameters
+    ----------
+    img : 2D array
+        Background-subtracted + masked cutout image.
+    aperture_params : dict
+        Dictionary with keys ['a', 'b', 'theta', 'x_center', 'y_center'].
+    n_random : int
+        Number of random apertures to place.
+    
+    Returns
+    -------
+    rms : float
+        Empirical RMS of aperture fluxes.
+    """
+    ny, nx = img.shape
+    aperturesums = []
+    attempts = 0
+    max_attempts = n_random * 20
+    
+    # aperture shape (scale only, will move centres + vary theta)
+    a = aperture_params['a']
+    b = aperture_params['b']
+    theta_ref = aperture_params['theta']
+    x0, y0 = aperture_params['x_center'], aperture_params['y_center']
+
+    while len(aperturesums) < n_random and attempts < max_attempts:
+        attempts += 1
+        
+        # random centre inside image (avoid edges)
+        x = random.uniform(a+2, nx - a - 2)
+        y = random.uniform(b+2, ny - b - 2)
+
+        # skip if centre falls on masked pixel
+        if np.isnan(img[int(y), int(x)]):       # NaN is the only value not similar to itself! Important!
+            continue
+
+        # random angle variation (around reference theta)
+        theta = random.uniform(0, 2*np.pi)
+
+        aperture = EllipticalAperture((x, y), a, b, theta)
+        phot_table = aperture_photometry(img, aperture, method="exact")
+        flux = phot_table['aperture_sum'][0]
+
+        if np.isfinite(flux):
+            aperturesums.append(flux)
+
+    if len(aperturesums) < max(10, n_random // 4):
+        # fallback: pixel rms scaled to aperture area
+        print("⚠️ Too few valid random apertures, using pixel RMS fallback")
+        pixrms = np.nanstd(img)
+        area = np.pi * a * b
+        return pixrms * np.sqrt(area)
+
+    return np.std(aperturesums, ddof=1)
+
+
+def recompute_empirical_snr(vis_data, n_random=200):
+    """
+    Compute flux & empirical S/N at source centre using background-subtracted image
+    with combined mask applied.
+    """
+    
+    galaxy_id = vis_data["galaxy_id"]
+    print(f"Recomputing empirical S/N for {galaxy_id}...")
+    
+    img = vis_data["background_subtracted"]
+    
+    bkg_mask = vis_data["segmentation_mask"] | np.isnan(vis_data["original_data"])
+    clean_image = np.where(bkg_mask, np.nan, img)
+    
+    
+    combined_mask = vis_data["source_mask"] | bkg_mask
+    very_clean_image = np.where(combined_mask, np.nan, img)
+    
+    # Load aperture used for photometry
+    aperture_params = vis_data['aperture_params']
+    x_center = aperture_params['x_center']
+    y_center = aperture_params['y_center']
+    a = aperture_params['a']
+    b = aperture_params['b']
+    theta = aperture_params['theta']
+    
+    
+    ny, nx = img.shape
+    centre = (x_center, y_center)
+
+    flux = aperture_flux_at(clean_image, aperture_params)
+    emp_rms = empirical_aperture_rms(very_clean_image, aperture_params = aperture_params, n_random=n_random)
+    sn = flux / emp_rms if emp_rms > 0 else 0.0
+
+    return dict(
+        objid=vis_data["galaxy_id"],
+        flux=flux,
+        flux_err=emp_rms,
+        sn=sn,
+        centre=centre
+    )
+
+def stack_cutouts(fits_paths, hdu_index=1, method='median'):
+    imgs = []
+    for p in fits_paths:
+        with fits.open(p) as hdul:
+            imgs.append(hdul[hdu_index].data.astype(float))
+    arr = np.stack(imgs, axis=0)
+    if method == 'median':
+        return np.nanmedian(arr, axis=0)
+    return np.nanmean(arr, axis=0)
