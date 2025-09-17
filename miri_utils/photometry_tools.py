@@ -1235,110 +1235,80 @@ def create_fits_table_from_csv(csv_paths, output_file):
 
 
 
-def galaxy_statistics(table_path, fig_path=None, stats_path=None, detections=None, cols=4):
+from collections import defaultdict
+from astropy.table import Table
+
+def write_detection_stats(table_path, stats_path=None, nondetections=None):
     """
-    Analyse how many galaxies are observed in each filter, and which galaxy IDs appear per filter.
+    Summarise galaxy detection statistics per filter and overall.
 
     Parameters:
     -----------
     table_path : str
         Path to the FITS table.
-    fig_path : str (optional)
-        Path to the output figure.
     stats_path : str (optional)
         Path to the output statistics file.
-    detections : dict (optional)
-        A dictionary mapping each filter to an array of galaxy IDs that are detected.
-    cols : int
-        The number of columns that should be displayed.
-    
-    Returns:
-    --------
-    filter_id_map : dict
-        Dictionary mapping each filter to a set of galaxy IDs.
+    nondetections : dict (optional)
+        Dictionary mapping each filter to a list of galaxy IDs that are NOT detected.
     """
     table = Table.read(table_path, format='fits')
 
     if 'Filters' not in table.colnames or 'ID' not in table.colnames:
         raise ValueError("FITS table must contain 'Filters' and 'ID' columns.")
 
-    filter_id_map = defaultdict(set)
+    total_galaxies = 153  # Total number of galaxies in the Blue Jay sample
+    
+    # Build per-filter detection counts
+    filter_detection_counts = {}
+    filter_imaged_counts = {}
+    detected_in_any = set()
+    imaged_in_any = set()
 
     for row in table:
-        gid = row['ID']
-        filters_str = row['Filters']
-        filters = [f.strip() for f in filters_str.split(',') if f.strip()]
+        filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
+        gid = str(row['ID'])
+        
+        if filters:
+                imaged_in_any.add(gid)
+                
         for filt in filters:
-            if detections is None or gid in detections[filt]:
-                filter_id_map[filt].add(gid)
+            filter_imaged_counts[filt] = filter_imaged_counts.get(filt, 0) + 1
+                
+            if nondetections is None or int(gid) not in nondetections.get(filt, []):
+                filter_detection_counts[filt] = filter_detection_counts.get(filt, 0) + 1
+                detected_in_any.add(gid)
+            
 
-    # Print summary
-    print("\nGalaxy Filter Mapping:")
-    print("=" * 30)
-    for filt, ids in filter_id_map.items():
-        print(f"{filt:10s}: {len(ids)} galaxies")
-
-    if fig_path:
-        if detections: title = 'MIRI Detections'
-        else: title = 'MIRI Coverage'
-        
-        plot_galaxy_filter_matrix(table_path, fig_path, None, detections, cols)
-        print(f'Saved output plot to {fig_path}')
-    if stats_path:
-        write_galaxy_stats(table, stats_path, detections)
-        print(f'Wrote galaxy statistics to {stats_path}')
-    
-    return filter_id_map
-
-def write_galaxy_stats(table, output_path, detections):
-    with open(output_path, 'w') as f:
-        f.write("Galaxy filter mapping summary:\n")
+    # Write summary
+    with open(stats_path, 'w') as f:
+        f.write("Galaxy Imaging Summary per Filter\n")
         f.write("="*40 + "\n")
+        for filt, count in filter_imaged_counts.items():
+            f.write(f"{filt:10s}: {count} / {total_galaxies} galaxies "
+                    f"({(count/total_galaxies)*100:.1f}%) imaged\n")
 
-        # 1. Which galaxy IDs are mapped in which filters
-        f.write("Per-galaxy Filter Coverage:\n")
-        f.write("-" * 35 + "\n")
-        for row in table:
-            gid = row['ID']
-            filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
-            f.write(f"Galaxy {gid}: {', '.join(filters)}\n")
+        f.write(f"\nImaged in at least one filter: {len(imaged_in_any)} / {total_galaxies} galaxies "
+                f"({(len(imaged_in_any)/total_galaxies)*100:.1f}%)\n")
 
-        # 2. Group by number of filters
-        f.write("\nGalaxies by Number of Filters Covered:\n")
-        f.write("-" * 45 + "\n")
-        filters_per_count = defaultdict(list)
+        f.write("\nGalaxy Detection Summary per Filter\n")
+        f.write("="*40 + "\n")
+        for filt, count in filter_detection_counts.items():
+            f.write(f"{filt:10s}: {count} / {filter_imaged_counts.get(filt, 0)} galaxies "
+                    f"({(count/filter_imaged_counts.get(filt, 1))*100:.1f}%) detected\n")
 
-        for row in table:
-            gid = row['ID']
-            filters = [f.strip() for f in row['Filters'].split(',') if f.strip()]
-            filters_per_count[len(filters)].append((gid, filters))
+        f.write(f"\nDetected in at least one filter: {len(detected_in_any)} / {len(imaged_in_any)} galaxies "
+                f"({(len(detected_in_any)/len(imaged_in_any))*100:.1f}%)\n")
 
-        for n in sorted(filters_per_count.keys()):
-            f.write(f"\nMapped in {n} filter(s): {len(filters_per_count[n])} galaxies\n")
-            for gid, filt_list in filters_per_count[n]:
-                f.write(f"  {gid}: {', '.join(filt_list)}\n")
-        
-        # 3. Write detection statistics
-        f.write("\nGalaxy Detection Statistics:\n")
-        f.write("-" * 35 + "\n")
-
-        all_ids = set(str(row['ID']) for row in table)
-        total_galaxies = len(all_ids)
-        detected_in_any = set()
-
-        for filt, det_ids in detections.items():
-            # Convert to strings to match ID format
-            detected = set(str(i) for i in det_ids)
-            detected_in_any.update(detected)
-
-            f.write(f"{filt}: {len(detected)} / {total_galaxies} galaxies ({(len(detected) / total_galaxies) * 100:.1f}%) detected\n")
-
-        f.write(f"\nDetected in at least one filter: {len(detected_in_any)} / {total_galaxies} galaxies ({(len(detected_in_any) / total_galaxies) * 100:.1f}%)\n")
+    print(f'Wrote galaxy statistics to {stats_path}')
 
 
-def plot_galaxy_filter_matrix(table_path, fig_path, title=None, detections=None, cols=4):
+
+
+
+def plot_galaxy_filter_matrix(table_path, fig_path, title=None, nondetections=None, cols=4):
     """
-    Visualise which galaxies are observed and detected in which filters using a binary matrix plot.
+    Visualise which galaxies are observed and detected in which filters,
+    but using a dictionary of *non-detections* instead of detections.
 
     Parameters:
     -----------
@@ -1348,8 +1318,10 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, detections=None,
         Path to the output file.
     title : str, optional
         Title of the plot.
-    detections : dict, optional
-        Dictionary mapping filter names to lists of galaxy IDs that were detected in that filter.
+    nondetections : dict, optional
+        Dictionary mapping filter names to lists of galaxy IDs that were NOT detected.
+    cols : int
+        Number of subplot columns.
     """
     table = Table.read(table_path, format='fits')
     
@@ -1370,12 +1342,11 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, detections=None,
     num_cols = len(filter_order)
     num_rows = chunk_size
     fig_width = cell_size * num_cols * cols
-    fig_height = cell_size * num_rows * 0.65
+    fig_height = cell_size * num_rows * 0.7
     
     fig, axes = plt.subplots(1, cols, figsize=(fig_width, fig_height), squeeze=False)
     axes = axes[0]
     
-    plot_number = 0
     for ax, g_ids in zip(axes, chunks):
         matrix = np.zeros((len(g_ids), len(filter_order)), dtype=int)
         g_index_map = {gid: i for i, gid in enumerate(g_ids)}
@@ -1391,12 +1362,17 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, detections=None,
                 filters = [f.decode() if isinstance(f, bytes) else str(f) for f in filters]
             else:
                 filters = [f.strip() for f in str(filters).split(',') if f.strip()]
+
             for filt in filters:
                 if filt in filter_order:
-                    if detections is None or int(gid) in detections.get(filt, []):
-                        f_idx = filter_order.index(filt)
+                    f_idx = filter_order.index(filt)
+
+                    # Inverted logic:
+                    # Galaxy is marked if it's covered AND not in nondetections for that filter
+                    if nondetections is None or int(gid) not in nondetections.get(filt, []):
                         matrix[g_idx, f_idx] = 1
 
+        # Draw rectangles
         for i in range(matrix.shape[0]):
             for j in range(matrix.shape[1]):
                 if matrix[i, j] == 1:
@@ -1420,7 +1396,7 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, detections=None,
                         plt.Rectangle((j, i), 1, 1, color=colour)
                     )
 
-        # Add labels with companion asterisk if flagged
+        # Labels with asterisk for companions
         y_labels = []
         for i, gid in enumerate(g_ids):
             row = table[table_id_to_row[gid]]
