@@ -13,7 +13,11 @@ from .params import build_obs, build_model, get_MAP
 from .plotting import load_and_display
 from sedpy.observate import getSED
 from astropy import constants as const
+from astropy.io import fits
 import pyphot
+from astropy.cosmology import WMAP9 as cosmo
+from astropy.table import Table
+from prospect.models.transforms import logsfr_ratios_to_sfrs
 
 
 def predict_phot():
@@ -180,3 +184,109 @@ def compute_residuals(objid, show_plot=True):
     print("Percentage difference:", perc)
     
     return rows
+
+def get_galaxy_properties(gid, non_detections=None):
+    """Obtain the star formation rates (SFRs) from the Prospector fit for a given galaxy ID.
+
+    Args:
+        gid (int): The galaxy ID for which to obtain the SFRs.
+    
+    Returns:
+        sfrs (ndarray): Array of star formation rates in solar masses per year.
+    """
+    
+    # ============================
+    # Part related to PROSPECTOR
+    # ============================
+    prospect_dir = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
+    
+    # Load the h5 file for the given objid
+    h5_path = os.path.join(prospect_dir, f"output_{gid}*.h5")
+    h5_file = glob.glob(h5_path)
+    
+    try:
+        h5_file = h5_file[0]
+        print(f"Found PROSPECTOR results for objid {gid}: {h5_file}")
+    except IndexError:
+        print(f"No PROSPECTOR results found for objid {gid}.")
+        return None
+    
+    # Load PROSPECTOR results
+    full_path = os.path.join(prospect_dir, h5_file)
+    results, _, _ = reader.results_from(full_path)
+    
+    # Get the MAP parameters
+    map_parameters = get_MAP(results)
+    map_parameters = map_parameters[:-3]
+    
+    # Build the MAP dictionary
+    MAP = {}
+    for a,b in zip(results['theta_labels'], map_parameters):
+        MAP[a] = b
+
+    zred = MAP['zred']
+    logmass = MAP['logmass']
+
+    # Reconstruct agebins used in the fits
+    tuniv = cosmo.age(zred).value
+    agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
+    agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
+    agebins = np.array([agelims[:-1], agelims[1:]]).T
+    nbins = len(agelims) - 1
+    
+    # Collect logsfr_ratios
+    logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
+    
+    # Convert to SFRs
+    sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
+    
+    # Convert log age bins to linear time (yr)
+    bin_edges = 10**agebins  # shape (nbins, 2)
+    
+    # Select bins younger than 100 Myr
+    timescale = 1e8  # 100 Myr in years
+    tcut = timescale
+    
+    # Compute overlap of each bin with interval [0, tcut]
+    overlap = np.maximum(0.0, np.minimum(bin_edges[:,1], tcut) - np.minimum(bin_edges[:,0], tcut))
+    
+    # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
+    mass_in_window = np.sum(sfrs * overlap)
+    sfr_last100 = mass_in_window / timescale
+    
+    # ============================
+    # Part related to the photometry
+    # ============================
+    
+    # Read the photometry table
+    phot_table = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/phot_tables/Photometry_Table_MIRI.fits'
+    phot_miri = fits.open(phot_table)[1].data
+    ph_miri = phot_miri[phot_miri['ID'] == gid]
+    
+    filters = ph_miri['Filters'][0].split(',')  # e.g. ['F770W', 'F1800W']
+    flux = ph_miri['Flux'][0]         # shape: (n_filters,)
+    err = ph_miri['Flux_Err'][0] # shape: (n_filters,)
+    
+    detected = {band: True for band in filters}
+    
+    for band in filters:
+        if non_detections is not None and gid in non_detections.get(band, []):
+            detected[band] = False
+    
+    galaxy_data = {
+        "gid": gid,
+        "zred": zred,
+        "logmass": logmass,
+        "sfrs": sfrs,                     # SFR in each bin
+        "sfr_last100": sfr_last100,       # averaged over last 100 Myr
+        "fluxes": dict(zip(filters, flux)),
+        "errors": dict(zip(filters, err)),
+        "detections": detected
+    }
+    
+    return galaxy_data
+    
+    
+
+    
+    

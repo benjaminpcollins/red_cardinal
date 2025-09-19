@@ -1,5 +1,6 @@
 # init for the prospector utils package
 
-from .plotting import reconstruct, plot_photometry, load_and_display, plot_transmission_curves, create_hist
+from .plotting import reconstruct, plot_photometry, load_and_display, plot_transmission_curves, create_hist, \
+    plot_all_galaxy_plots, plot_main_sequence, plot_mass_vs_redshift, plot_z_mass_parameter_space
 from .params import get_MAP, build_obs, build_model
-from .analysis import predict_phot, compute_residuals, get_model_photometry
+from .analysis import predict_phot, compute_residuals, get_model_photometry, get_galaxy_properties

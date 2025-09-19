@@ -455,6 +455,9 @@ def create_hist(csv_path, out_dir, bins=25):
         'jwst_f2100w': 21.0,
     }
 
+    bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+    colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']  # Distinct colors per band
+
     # Sort filter names by wavelength
     filters_sorted = sorted(filters,
                             key=lambda f: filter_wavelengths.get(f, np.inf))
@@ -463,19 +466,39 @@ def create_hist(csv_path, out_dir, bins=25):
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True, sharey=True)
     axes = axes.flatten()  # easier to index
 
-    for ax, f in zip(axes, filters_sorted):
+    for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
         subset = df[df['filter_name'] == f]
-        ax.hist(subset['N_sigma'], bins=bins, color='skyblue', alpha=0.7, edgecolor='black')
-        ax.set_title(f'{f}')
+        
+        ax.hist(subset['N_sigma'], bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
+        ax.set_title(f'{bands[i]}')
         ax.set_xlim(x_min, x_max)
         ax.set_xlabel(r'$N_\sigma$')
         ax.set_ylabel('Number of galaxies')
 
+        nsigmas = subset['N_sigma']
+        # Add compact statistics
+        mean_ratio = np.mean(nsigmas)
+        std_ratio = np.std(nsigmas)
+        N = len(subset['galaxy_id'].unique())
+        num = f'N = {N}'
+
+        median_ratio = np.median(nsigmas)
+        
+        stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
+            
+        ax.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        # Annotate in the top-right corner (adjust x,y if needed)
+        #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
+        #        transform=ax.transAxes, ha='right', va='top',
+        #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+        
     #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_all_filters.png')
+    filename = os.path.join(out_dir, 'Nsigma_all_filters_v2.png')
     plt.savefig(filename, dpi=300)
     plt.show()
     
@@ -489,6 +512,15 @@ def create_hist(csv_path, out_dir, bins=25):
         plt.title(rf'$N_\sigma$ distribution for {f}')
         plt.xlim(x_min, x_max)
         plt.tight_layout()
+        
+        # Count how many galaxies are in this filter
+        n_galaxies = len(subset['galaxy_id'].unique())
+        # Annotate in the top-right corner (adjust x,y if needed)
+        plt.text(0.95, 0.95, f'N = {n_galaxies}',
+            transform=plt.gca().transAxes,  # coordinates relative to the axes (0–1)
+            ha='right', va='top',
+            fontsize=10,
+            bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
         
         # Save each histogram with the filter name
         filename = os.path.join(out_dir, f'{f}_Nsigma.png')
@@ -504,17 +536,17 @@ def create_hist(csv_path, out_dir, bins=25):
     for gal in galaxies:
         subset = df[df['galaxy_id'] == gal]
         
-        plt.figure(figsize=(6, 4))
+        plt.figure(figsize=(5, 4))
         plt.hist(subset['N_sigma'], bins=25, color='skyblue', alpha=0.7, range=(x_min, x_max), edgecolor='black')
         plt.xlim(0, x_max)        
-        plt.title(r'$N_\sigma$ Distribution - ' + f'{gal}')
+        #plt.title(r'$N_\sigma$ Distribution - ' + f'{gal}')
         plt.xlabel(r'$N_\sigma$')    
         plt.ylabel('Number of bands')
         plt.tight_layout()
         
         os.makedirs(out_dir, exist_ok=True)
-        filename = os.path.join(out_dir, f'{gal}_Nsigma.png')
-        plt.savefig(filename, dpi=300)
+        filename = os.path.join(out_dir, f'{gal}_Nsigma_notitle.png')
+        #plt.savefig(filename, dpi=300)
         plt.close()
         print(f"✅ Saved histogram for galaxy {gal} to {filename}")
 
@@ -536,9 +568,18 @@ def create_hist(csv_path, out_dir, bins=25):
     plt.hist(chi2_df['reduced_chi2'], bins=25, color='salmon', alpha=0.7, edgecolor='black', range=(0, chi2_df['reduced_chi2'].quantile(0.95)))
     plt.xlabel(r'Reduced $\chi^2$')
     plt.ylabel('Number of galaxies')
-    plt.title(r'Reduced $\chi^2$ distribution')
+    #plt.title(r'Reduced $\chi^2$ distribution')
+    
+    # Count how many chi2 values are in the histogram
+    chi2_values = len(chi2_df)
+    # Annotate in the top-right corner (adjust x,y if needed)
+    plt.text(0.95, 0.95, f'N = {chi2_values}',
+        transform=plt.gca().transAxes,  # coordinates relative to the axes (0–1)
+        ha='right', va='top',
+        fontsize=10,
+        bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
     plt.tight_layout()
-    filename = os.path.join(out_dir, 'reduced_chi2_hist_cropped.png')
+    filename = os.path.join(out_dir, 'reduced_chi2_hist_notitle.png')
     plt.savefig(filename, dpi=300)
     plt.show()
     
@@ -556,9 +597,9 @@ def create_hist(csv_path, out_dir, bins=25):
     plt.scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
     plt.xlabel('Number of photometric data points')
     plt.ylabel(r'Reduced $\chi^2$')
-    plt.title(r'Reduced $\chi^2$ vs. number of MIRI bands')
+    #plt.title(r'Reduced $\chi^2$ vs. number of MIRI bands')
     plt.axhline(1, color='red', linestyle='--')
-    filename = os.path.join(out_dir, 'reduced_chi2_vs_npoints_cropped.png')
+    filename = os.path.join(out_dir, 'reduced_chi2_vs_npoints_notitle.png')
     plt.savefig(filename, dpi=300)
     plt.show()
 
@@ -572,6 +613,24 @@ def create_hist(csv_path, out_dir, bins=25):
 
     # Merge with chi2_df
     chi2_df = chi2_df.merge(frac_disc, on='galaxy_id', how='left')
+
+    # Plot histogram of the mean fractional difference
+    plt.figure(figsize=(6,4))
+    plt.hist(chi2_df['mean_frac_diff'], bins=25, color='palegreen', alpha=0.7, edgecolor='black', range=(0, chi2_df['mean_frac_diff'].quantile(0.9)))
+    plt.xlabel('Mean fractional difference per galaxy')
+    plt.ylabel('Number of galaxies')
+    #plt.title('Mean fractional difference per galaxy')
+    
+    # Annotate in the top-right corner (adjust x,y if needed)
+    plt.text(0.95, 0.95, f'N = {chi2_values}',
+        transform=plt.gca().transAxes,  # coordinates relative to the axes (0–1)
+        ha='right', va='top',
+        fontsize=10,
+        bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+    plt.tight_layout()
+    filename = os.path.join(out_dir, 'mean_frac_diff_hist_notitle.png')
+    plt.savefig(filename, dpi=300)
+    plt.show()
 
     # Move n_filters to the last column explicitly
     cols = [c for c in chi2_df.columns if c != 'n_filters'] + ['n_filters']
@@ -588,4 +647,232 @@ def create_hist(csv_path, out_dir, bins=25):
     print(f"Saved ranked fit quality table to {filename}")
     print(chi2_df_sorted.head(10))  # quick preview
 
-    return
+
+
+
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pickle as pkl
+from matplotlib.colors import ListedColormap
+"""
+def setup_publication_style():
+    """Set up matplotlib for publication-quality plots"""
+    plt.rcParams.update({
+        'font.size': 12,
+        'font.family': 'serif',
+        'axes.linewidth': 1.5,
+        'axes.spines.top': False,
+        'axes.spines.right': False,
+        'xtick.major.size': 6,
+        'ytick.major.size': 6,
+        'xtick.major.width': 1.5,
+        'ytick.major.width': 1.5,
+        'grid.alpha': 0.3,
+        'grid.linewidth': 0.8,
+        'legend.frameon': True,
+        'legend.fancybox': True,
+        'legend.shadow': True,
+        'figure.dpi': 100,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight'
+    })
+"""
+
+
+def get_color_scheme(scheme_name='viridis'):
+    """Get color schemes for detection plotting"""
+    schemes = {
+        'viridis': ['#440154', '#31688e', '#35b779', '#fde725'],
+        'plasma': ['#0d0887', '#7e03a8', '#cc4678', '#f89441', '#f0f921'],
+        'cool': ['#3182bd', '#6baed6', '#9ecae1', '#c6dbef'],
+        'warm': ['#d73027', '#f46d43', '#fdae61', '#fee08b'],
+        'scientific': ['#2166ac', '#4393c3', '#92c5de', '#d1e5f0', '#f7f7f7', '#fddbc7', '#f4a582', '#d6604d', '#b2182b']
+    }
+    return schemes.get(scheme_name, schemes['viridis'])
+
+def plot_mass_vs_redshift(zreds, masses, ndetections, save_path='mass_vs_redshift.png'):
+    """
+    Plot stellar mass vs redshift with detection status
+    
+    Parameters:
+    -----------
+    zreds : array-like
+        Redshift values
+    masses : array-like
+        Stellar masses in solar masses
+    ndetections : array-like
+        Number of MIRI detections per galaxy
+    save_path : str
+        Path to save the plot
+    """
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    detected = ndetections > 0
+    
+    # Plot non-detected galaxies first (so detected ones appear on top)
+    ax.scatter(zreds[~detected], masses[~detected], 
+              s=80, alpha=0.6, color='#808080',
+              edgecolor='black', linewidth=0.5,
+              label=f'No detections (N={np.sum(~detected)})', zorder=2)
+    
+    ax.scatter(zreds[detected], masses[detected], 
+              s=80, alpha=0.8, color='#ff7f0e', 
+              edgecolor='black', linewidth=0.5,
+              label=f'MIRI detections (N={np.sum(detected)})', zorder=3)
+    
+    ax.set_xlabel('Redshift (z)', fontsize=14)
+    ax.set_ylabel('Stellar Mass (M$_\\odot$)', fontsize=14)
+    ax.set_yscale('log')
+    ax.set_title('Stellar Mass vs Redshift', fontsize=16, fontweight='bold', pad=20)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best')
+    
+    # Add sample statistics as text
+    ax.text(0.02, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
+            transform=ax.transAxes, verticalalignment='top', 
+            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Plot saved as {save_path}")
+
+def plot_main_sequence(masses, sfr100, ndetections, color_scheme='viridis', save_path='main_sequence.png'):
+    """
+    Plot the star-forming main sequence
+    
+    Parameters:
+    -----------
+    masses : array-like
+        Stellar masses in solar masses
+    sfr100 : array-like
+        Star formation rates (100 Myr)
+    ndetections : array-like
+        Number of MIRI detections per galaxy
+    color_scheme : str
+        Color scheme to use
+    save_path : str
+        Path to save the plot
+    """
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    colors = get_color_scheme(color_scheme)
+    cmap = ListedColormap(colors)
+    
+    sc = ax.scatter(masses, sfr100, c=ndetections, 
+                   cmap=cmap, s=80, alpha=0.8,
+                   edgecolor='black', linewidth=0.5,
+                   vmin=0, vmax=len(colors)-1)
+    
+    ax.set_xlabel('Stellar Mass (M$_\\odot$)', fontsize=14)
+    ax.set_ylabel('SFR$_{100 Myr}$ (M$_\\odot$ yr$^{-1}$)', fontsize=14)
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_title('Star-Forming Main Sequence', fontsize=16, fontweight='bold', pad=20)
+    ax.grid(True, alpha=0.3)
+    
+    # Colorbar
+    cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
+    cbar.set_label('Number of MIRI Detections', fontsize=12)
+    cbar.set_ticks(np.arange(0, len(colors)))
+    
+    # Add main sequence line (optional - you can customize this)
+    mass_range = np.logspace(9, 11.5, 100)
+    
+    # Typical main sequence relation: log(SFR) = 0.8*log(M) - 8.5 (adjust as needed)
+    ms_sfr = 0.8 * np.log10(mass_range) - 6.5
+    
+    ax.plot(mass_range, 10**ms_sfr, 'k--', alpha=0.5, linewidth=2, label='Main Sequence')
+    ax.legend(loc='lower right')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Plot saved as {save_path}")
+
+def plot_z_mass_parameter_space(zreds, logmasses, ndetections, color_scheme='viridis', save_path='z_mass_parameter_space.png'):
+    """
+    Plot z-M parameter space
+    
+    Parameters:
+    -----------
+    zreds : array-like
+        Redshift values
+    logmasses : array-like
+        Log stellar masses
+    ndetections : array-like
+        Number of MIRI detections per galaxy
+    color_scheme : str
+        Color scheme to use
+    save_path : str
+        Path to save the plot
+    """
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    colors = get_color_scheme(color_scheme)
+    cmap = ListedColormap(colors)
+    
+    sc = ax.scatter(zreds, logmasses, c=ndetections, 
+                   cmap=cmap, s=80, alpha=0.8,
+                   edgecolor='black', linewidth=0.5,
+                   vmin=0, vmax=len(colors)-1)
+    
+    ax.set_xlabel('Redshift (z)', fontsize=14)
+    ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
+    ax.set_title('z-M Parameter Space', fontsize=16, fontweight='bold', pad=20)
+    ax.grid(True, alpha=0.3)
+    
+    # Colorbar
+    cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
+    cbar.set_label('Number of MIRI Detections', fontsize=12)
+    cbar.set_ticks(np.arange(0, len(colors)))
+    
+    # Add mass completeness line (optional - customize as needed)
+    z_range = np.linspace(zreds.min(), zreds.max(), 100)
+    # Example completeness limit: log(M) = 9.5 + 0.3*z (adjust to your survey)
+    #completeness_limit = 9.5 + 0.3 * z_range
+    #ax.plot(z_range, completeness_limit, 'r--', alpha=0.7, linewidth=2, 
+    #        label='Mass Completeness Limit')
+    #ax.legend(loc='lower right')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Plot saved as {save_path}")
+
+def plot_all_galaxy_plots(zreds, logmasses, masses, sfr100, ndetections, 
+                         color_scheme='viridis', save_dir='./'):
+    """
+    Generate all three plots at once
+    
+    Parameters:
+    -----------
+    zreds, logmasses, masses, sfr100, ndetections : array-like
+        Your galaxy data arrays
+    color_scheme : str
+        Color scheme for the plots
+    save_dir : str
+        Directory to save plots
+    """
+    print(f"Generating galaxy plots with {len(zreds)} galaxies...")
+    print(f"Redshift range: {zreds.min():.2f} - {zreds.max():.2f}")
+    print(f"Mass range: {masses.min():.2e} - {masses.max():.2e} M☉")
+    print(f"SFR range: {sfr100.min():.2f} - {sfr100.max():.2f} M☉/yr")
+    print(f"Detections: {np.sum(ndetections > 0)}/{len(ndetections)} galaxies detected")
+    print()
+    
+    # Set up publication style
+    setup_publication_style()
+    
+    # Generate all plots
+    plot_mass_vs_redshift(zreds, masses, ndetections, 
+                         save_path=f'{save_dir}/mass_vs_redshift.png')
+    
+    plot_main_sequence(masses, sfr100, ndetections, color_scheme,
+                      save_path=f'{save_dir}/main_sequence.png')
+    
+    plot_z_mass_parameter_space(zreds, logmasses, ndetections, color_scheme,
+                               save_path=f'{save_dir}/z_mass_parameter_space.png')
+    
+    print("All plots generated successfully!")

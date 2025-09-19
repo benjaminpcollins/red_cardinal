@@ -306,7 +306,7 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     # ----------------------------
     # A non-parametric SFH model of mass in fixed time bins with a smoothness prior
     
-    tuniv = cosmo.age(zred).value#*1e6
+    tuniv = cosmo.age(zred).value
     #agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.95*tuniv*1000), 13), tuniv*1000 )
     agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
     agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
