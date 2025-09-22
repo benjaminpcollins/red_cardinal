@@ -1342,7 +1342,7 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, nondetections=No
     num_cols = len(filter_order)
     num_rows = chunk_size
     fig_width = cell_size * num_cols * cols
-    fig_height = cell_size * num_rows * 0.7
+    fig_height = cell_size * num_rows * 0.8
     
     fig, axes = plt.subplots(1, cols, figsize=(fig_width, fig_height), squeeze=False)
     axes = axes[0]
@@ -1408,11 +1408,11 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, nondetections=No
         ax.set_xlim(0, len(filter_order))
         ax.set_ylim(len(g_ids), 0)
         ax.set_xticks(np.arange(len(filter_order)) + 0.5)
-        ax.set_xticklabels(filter_order, rotation=45, ha='right')
+        ax.set_xticklabels(filter_order, rotation=45, ha='right', fontsize=11)
         ax.set_yticks(np.arange(len(g_ids)) + 0.5)
-        ax.set_yticklabels(y_labels, fontsize=8)
+        ax.set_yticklabels(y_labels, fontsize=11)
 
-    plt.suptitle(title, fontsize=14)
+    plt.suptitle(title, fontsize=28)
     plt.tight_layout()
     os.makedirs(os.path.dirname(fig_path), exist_ok=True)
     plt.savefig(fig_path, dpi=150)
@@ -2174,7 +2174,7 @@ def aperture_flux_at(img, aperture_params):
     phot = aperture_photometry(img, aperture, method='exact')
     return phot['aperture_sum'][0]
 
-def empirical_aperture_rms(img, aperture_params, n_random=200):
+def empirical_aperture_rms(img, aperture_params, n_random=200, valid_frac=0.25):
     """
     Estimate RMS by placing random elliptical apertures on the image.
     
@@ -2186,7 +2186,8 @@ def empirical_aperture_rms(img, aperture_params, n_random=200):
         Dictionary with keys ['a', 'b', 'theta', 'x_center', 'y_center'].
     n_random : int
         Number of random apertures to place.
-    
+    valid_frac : float
+        Minimum fraction of aperture pixels that must be valid (not NaN)
     Returns
     -------
     rms : float
@@ -2218,15 +2219,29 @@ def empirical_aperture_rms(img, aperture_params, n_random=200):
         theta = random.uniform(0, 2*np.pi)
 
         aperture = EllipticalAperture((x, y), a, b, theta)
+        aperture_mask = aperture.to_mask(method='exact')
+        aperture_data = aperture_mask.multiply(img)
+        aperture_data_mask = aperture_mask.data
+        
+        # Accept apertures with sufficient valid pixels
+        n_valid = np.sum(np.isfinite(aperture_data[aperture_data_mask > 0]))
+        n_total = np.sum(aperture_data_mask > 0)
+        frac_valid = n_valid / n_total if n_total > 0 else 0
+        if frac_valid < valid_frac:
+            continue
+        
         phot_table = aperture_photometry(img, aperture, method="exact")
         flux = phot_table['aperture_sum'][0]
+        
+        if n_valid > 0:
+            flux *= (n_total / n_valid)   # scale correction
 
         if np.isfinite(flux):
             aperturesums.append(flux)
 
     if len(aperturesums) < max(10, n_random // 4):
         # fallback: pixel rms scaled to aperture area
-        print("⚠️ Too few valid random apertures, using pixel RMS fallback")
+        print("📉 Too few valid random apertures, using pixel RMS fallback")
         pixrms = np.nanstd(img)
         area = np.pi * a * b
         return pixrms * np.sqrt(area)
