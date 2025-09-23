@@ -693,7 +693,7 @@ def get_color_scheme(scheme_name='viridis'):
     }
     return schemes.get(scheme_name, schemes['viridis'])
 
-def plot_main_sequence(masses, sfr100, zred_ms, detections, color_scheme='viridis', gradient='absolute', save_path='main_sequence.png'):
+def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_scheme='viridis', gradient='absolute', save_path='main_sequence.png'):
     """
     Plot the star-forming main sequence
     
@@ -705,10 +705,14 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, color_scheme='viridi
         Star formation rates (100 Myr)
     zred_ms : float
         Median redshift of the sample
-    ndetections : array-like
-        Number of MIRI detections per galaxy
-    color_scheme : str
+    detections : dict
+        Dict of filters and detections per galaxy
+    data : dict, optional
+        Dict of filters and data to colourise by
+    color_scheme : str, optional
         Color scheme to use
+    gradient : str, optional
+        Choose what to colour by
     save_path : str
         Path to save the plot
     """
@@ -737,7 +741,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, color_scheme='viridi
     logSFR_low  = (slope - slope_err) * logM_grid + (intercept - intercept_err)
     
     # Now let's introduce the plot
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots(figsize=(6, 4))
     
     if gradient == 'absolute':
         cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
@@ -747,9 +751,18 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, color_scheme='viridi
         for det in detections: 
             N_detected.append(sum(det.values()))
         N_detected = np.array(N_detected)
+        
+        # Scatter plot
         sc = plt.scatter(logM, logSFR_sample, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8)
         
+        # Colorbar
+        cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
+        cbar.set_label('Number of MIRI detections')
+        cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
+        save_path += f'sfms_{gradient}.png'
+        
     elif gradient == 'relative':  
+        cmap = plt.get_cmap(color_scheme)
         N_detected = []
         N_available = []
         for det in detections: 
@@ -759,24 +772,86 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, color_scheme='viridi
         N_available = np.array(N_available)
         f_det = N_detected / N_available  # fraction 0-1  
         
-        cmap = plt.get_cmap(color_scheme)
-
+        # Scatter plot
         sc = ax.scatter(logM, logSFR_sample, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
-          
-    else:
-        print("⚠️Gradient has to be set to either absolute or relative.")
-        return None
-    
-    # Colourbar
-    if gradient == 'absolute':
-        cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
-        cbar.set_label('Number of MIRI detections')
-        cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
-    elif gradient == 'relative':
+        
+        # Colorbar
         cbar = plt.colorbar(sc, ax=ax)
         cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
         cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
         cbar.set_label('Relative number of MIRI detections')
+        save_path += f'sfms_{gradient}.png'
+    
+    elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
+        flux_array = []
+        mask = []
+        band = gradient.upper()
+        
+        for det_dict, flux_dict in zip(detections, data):
+            if det_dict.get(band, False) and band in flux_dict:
+                flux_array.append(flux_dict[band])
+                mask.append(True)
+            else:
+                flux_array.append(np.nan)
+                mask.append(False)
+        
+        mask = np.array(mask)
+        
+        # Apply mask to all quantities
+        flux_array = np.array(flux_array)[mask]*1e6
+        logM = np.array(logM)[mask]
+        logSFR_sample = np.array(logSFR_sample)[mask]
+        
+        # Convert flux to log scale
+        log_flux_array = np.log10(flux_array)
+
+        if gradient == 'f770w': color_scheme = "Blues"
+        elif gradient == 'f1000w': color_scheme = "Greens"
+        elif gradient == 'f1800w': color_scheme = "Oranges"
+        elif gradient == 'f2100w': color_scheme = "Reds"
+
+        # Create scatter plot coloured by log flux
+        sc = ax.scatter(logM, logSFR_sample, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8)
+        
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
+        #ax.set_xlim(8, 13)
+        ax.set_ylim(-1, 4)
+        save_path += f'sfms_{gradient}.png'
+        
+    elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
+        nsig_array = []
+        mask = []
+        band = gradient.split('_')[1].upper()
+        
+        color_scheme = "gnuplot2"
+        
+        for det_dict, nsig_dict in zip(detections, data):
+            if det_dict.get(band, False) and band in nsig_dict:
+                nsig_array.append(nsig_dict[band])
+                mask.append(True)
+            else:
+                nsig_array.append(np.nan)
+                mask.append(False)
+        
+        mask = np.array(mask)
+
+        # Apply mask to all quantities
+        nsig_array = np.array(nsig_array)[mask]
+        logM = np.array(logM)[mask]
+        logSFR_sample = np.array(logSFR_sample)[mask]
+        
+        # Create scatter plot coloured by log flux
+        sc = ax.scatter(logM, logSFR_sample, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7)
+        
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf'$N_\sigma$ ({band})')
+        ax.set_ylim(-1, 4)
+        save_path += f'sfms_{gradient}.png'
+        
+    else:
+        print("⚠️Gradient has to be set to either absolute or relative.")
+        return None
 
     # MS line and shaded 1-sigma region
     ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
@@ -876,7 +951,7 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
                 mask.append(False)
         
         mask = np.array(mask)
-
+        
         # Apply mask to all quantities
         flux_array = np.array(flux_array)[mask]*1e6
         zreds = np.array(zreds)[mask]
@@ -884,6 +959,11 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
 
         # Convert flux to log scale
         log_flux_array = np.log10(flux_array)
+
+        if gradient == 'f770w': color_scheme = "Blues"
+        elif gradient == 'f1000w': color_scheme = "Greens"
+        elif gradient == 'f1800w': color_scheme = "Oranges"
+        elif gradient == 'f2100w': color_scheme = "Reds"
 
         # Create scatter plot coloured by log flux
         sc = ax.scatter(zreds, logmasses, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8)
