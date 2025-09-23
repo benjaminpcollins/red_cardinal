@@ -1,17 +1,17 @@
 import os
 import glob
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors, Normalize, ListedColormap
 import pickle as pkl
 from datetime import datetime
-import fsps
 import prospect.io.read_results as reader
 from prospect.sources import FastStepBasis
 from prospect.utils.plotting import posterior_samples
 from .params import build_obs, build_model, get_MAP
-from sedpy.observate import getSED
-from astropy import constants as const
-import pandas as pd
+from astropy.cosmology import Planck18 as cosmo
+from astropy import units as u
 
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
@@ -53,11 +53,9 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         map_parameters = map_parameters[:-3]
         add_duste = results['run_params']['add_duste']
         add_agn = results['run_params']['add_agn']  # Maybe check if this is True?
-        suffix = ""
     else:
         map_parameters = map_parameters[:-6]
         add_agn = False
-        suffix = "nodust"
         
     # Get accurate redshifts from the MAP (obtained by MJ)    
     zred = map_parameters[0]
@@ -136,8 +134,8 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     weighted_var = np.sum(weights * residuals**2) / np.sum(weights)
     corr_uncertainty = np.sqrt(weighted_var / len(ratio))
     
-    print("Mean ratio between photometries: ", corr_factor)
-    print("Standard deviation: ", corr_uncertainty)
+    #print("Mean ratio between photometries: ", corr_factor)
+    #print("Standard deviation: ", corr_uncertainty)
     
     #for f, phot in zip(obs['filters'], maggies):
     #    print(f"{f.name}: {phot} maggies")
@@ -228,7 +226,7 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     
     if plot_dir:
         os.makedirs(plot_dir, exist_ok=True)
-        fname = os.path.join(plot_dir, f'{objid}_{suffix}.png')
+        fname = os.path.join(plot_dir, f'{objid}.png')
         plt.savefig(fname)
     plt.show()
     plt.close()
@@ -327,8 +325,13 @@ def plot_photometry(ax, obs, factor=3631e6):
         
         
 
-def load_and_display(objid, mod=None, mod_err=None):
-    path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_files/{objid}.pkl'
+def load_and_display(objid, duste=False, mod=None, mod_err=None, outfile=None):
+    
+    if duste == False:
+        path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_files/{objid}.pkl'
+    else:
+        path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_nodust/{objid}.pkl'
+    
     with open(path_to_pkl, 'rb') as f:
         fit_data = pkl.load(f)
     
@@ -418,9 +421,9 @@ def load_and_display(objid, mod=None, mod_err=None):
     ax.legend()
     
     plt.tight_layout()
-    if filename:
-        plt.savefig(filename)
-        print(f"✅ Plot saved to {filename}")
+    if outfile:
+        plt.savefig(outfile)
+        print(f"✅ Plot saved to {outfile}")
     plt.show()
     
     
@@ -442,6 +445,8 @@ def create_hist(csv_path, out_dir, bins=25):
 
     # Compute global x-axis limits (clip outliers if needed)
     x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
+    x_min = -8.5
+    x_max = 8.5
     bins = np.linspace(x_min, x_max, 25)
 
     filters = df['filter_name'].unique()
@@ -498,7 +503,7 @@ def create_hist(csv_path, out_dir, bins=25):
     plt.tight_layout(rect=[0, 0, 1, 0.96])
 
     # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_all_filters_v2.png')
+    filename = os.path.join(out_dir, 'Nsigma_all_filters.png')
     plt.savefig(filename, dpi=300)
     plt.show()
     
@@ -523,7 +528,7 @@ def create_hist(csv_path, out_dir, bins=25):
             bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
         
         # Save each histogram with the filter name
-        filename = os.path.join(out_dir, f'{f}_Nsigma.png')
+        filename = os.path.join(out_dir, f'{f}_Nsigma_abs.png')
         plt.savefig(filename, dpi=300)
         plt.show()
         plt.close()
@@ -531,7 +536,10 @@ def create_hist(csv_path, out_dir, bins=25):
     # Plot histograms for galaxies    
     galaxies = df['galaxy_id'].unique()
 
-    x_min, x_max = df['N_sigma'].min(), df['N_sigma'].max()
+    #x_min, x_max = df['N_sigma'].min(), df['N_sigma'].max()
+    
+    x_min = -10
+    x_max = 10
     
     for gal in galaxies:
         subset = df[df['galaxy_id'] == gal]
@@ -545,7 +553,7 @@ def create_hist(csv_path, out_dir, bins=25):
         plt.tight_layout()
         
         os.makedirs(out_dir, exist_ok=True)
-        filename = os.path.join(out_dir, f'{gal}_Nsigma_notitle.png')
+        filename = os.path.join(out_dir, f'{gal}_Nsigma_abs.png')
         #plt.savefig(filename, dpi=300)
         plt.close()
         print(f"✅ Saved histogram for galaxy {gal} to {filename}")
@@ -649,15 +657,9 @@ def create_hist(csv_path, out_dir, bins=25):
 
 
 
-
-
-import matplotlib.pyplot as plt
-import numpy as np
-import pickle as pkl
-from matplotlib.colors import ListedColormap
 """
 def setup_publication_style():
-    """Set up matplotlib for publication-quality plots"""
+    # Set up matplotlib for publication-quality plots
     plt.rcParams.update({
         'font.size': 12,
         'font.family': 'serif',
@@ -691,54 +693,7 @@ def get_color_scheme(scheme_name='viridis'):
     }
     return schemes.get(scheme_name, schemes['viridis'])
 
-def plot_mass_vs_redshift(zreds, masses, ndetections, save_path='mass_vs_redshift.png'):
-    """
-    Plot stellar mass vs redshift with detection status
-    
-    Parameters:
-    -----------
-    zreds : array-like
-        Redshift values
-    masses : array-like
-        Stellar masses in solar masses
-    ndetections : array-like
-        Number of MIRI detections per galaxy
-    save_path : str
-        Path to save the plot
-    """
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    detected = ndetections > 0
-    
-    # Plot non-detected galaxies first (so detected ones appear on top)
-    ax.scatter(zreds[~detected], masses[~detected], 
-              s=80, alpha=0.6, color='#808080',
-              edgecolor='black', linewidth=0.5,
-              label=f'No detections (N={np.sum(~detected)})', zorder=2)
-    
-    ax.scatter(zreds[detected], masses[detected], 
-              s=80, alpha=0.8, color='#ff7f0e', 
-              edgecolor='black', linewidth=0.5,
-              label=f'MIRI detections (N={np.sum(detected)})', zorder=3)
-    
-    ax.set_xlabel('Redshift (z)', fontsize=14)
-    ax.set_ylabel('Stellar Mass (M$_\\odot$)', fontsize=14)
-    ax.set_yscale('log')
-    ax.set_title('Stellar Mass vs Redshift', fontsize=16, fontweight='bold', pad=20)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='best')
-    
-    # Add sample statistics as text
-    ax.text(0.02, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
-            transform=ax.transAxes, verticalalignment='top', 
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Plot saved as {save_path}")
-
-def plot_main_sequence(masses, sfr100, ndetections, color_scheme='viridis', save_path='main_sequence.png'):
+def plot_main_sequence(masses, sfr100, zred_ms, detections, color_scheme='viridis', gradient='absolute', save_path='main_sequence.png'):
     """
     Plot the star-forming main sequence
     
@@ -748,6 +703,8 @@ def plot_main_sequence(masses, sfr100, ndetections, color_scheme='viridis', save
         Stellar masses in solar masses
     sfr100 : array-like
         Star formation rates (100 Myr)
+    zred_ms : float
+        Median redshift of the sample
     ndetections : array-like
         Number of MIRI detections per galaxy
     color_scheme : str
@@ -755,43 +712,88 @@ def plot_main_sequence(masses, sfr100, ndetections, color_scheme='viridis', save
     save_path : str
         Path to save the plot
     """
-    fig, ax = plt.subplots(figsize=(10, 8))
     
-    colors = get_color_scheme(color_scheme)
-    cmap = ListedColormap(colors)
+    # Example galaxy data arrays
+    logM = np.log10(masses)          # masses in solar masses
+    logSFR_sample = np.log10(sfr100) # SFR in solar masses per year
+
+    # Median redshift for MS line
+    t = cosmo.age(zred_ms).to(u.Gyr).value  # cosmic time in Gyr
+
+    # Speagle+14 coefficients
+    slope = 0.84 - 0.026 * t
+    intercept = -(6.51 - 0.11 * t)
+
+    # 1-sigma errors
+    slope_err = 0.02 + 0.003 * t
+    intercept_err = 0.24 + 0.03 * t
+
+    # Mass grid in log10(M)
+    logM_grid = np.linspace(np.min(logM)-0.1, np.max(logM)+0.1, 200)
+
+    # Main sequence
+    logSFR_MS = slope * logM_grid + intercept
+    logSFR_high = (slope + slope_err) * logM_grid + (intercept + intercept_err)
+    logSFR_low  = (slope - slope_err) * logM_grid + (intercept - intercept_err)
     
-    sc = ax.scatter(masses, sfr100, c=ndetections, 
-                   cmap=cmap, s=80, alpha=0.8,
-                   edgecolor='black', linewidth=0.5,
-                   vmin=0, vmax=len(colors)-1)
+    # Now let's introduce the plot
+    fig, ax = plt.subplots(figsize=(10, 5))
     
-    ax.set_xlabel('Stellar Mass (M$_\\odot$)', fontsize=14)
-    ax.set_ylabel('SFR$_{100 Myr}$ (M$_\\odot$ yr$^{-1}$)', fontsize=14)
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_title('Star-Forming Main Sequence', fontsize=16, fontweight='bold', pad=20)
-    ax.grid(True, alpha=0.3)
+    if gradient == 'absolute':
+        cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
+        bounds = np.arange(-0.5, 5.5, 1)
+        norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
+        N_detected = []
+        for det in detections: 
+            N_detected.append(sum(det.values()))
+        N_detected = np.array(N_detected)
+        sc = plt.scatter(logM, logSFR_sample, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8)
+        
+    elif gradient == 'relative':  
+        N_detected = []
+        N_available = []
+        for det in detections: 
+            N_detected.append(sum(det.values()))
+            N_available.append(len(det.values()))
+        N_detected = np.array(N_detected)
+        N_available = np.array(N_available)
+        f_det = N_detected / N_available  # fraction 0-1  
+        
+        cmap = plt.get_cmap(color_scheme)
+
+        sc = ax.scatter(logM, logSFR_sample, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
+          
+    else:
+        print("⚠️Gradient has to be set to either absolute or relative.")
+        return None
     
-    # Colorbar
-    cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
-    cbar.set_label('Number of MIRI Detections', fontsize=12)
-    cbar.set_ticks(np.arange(0, len(colors)))
-    
-    # Add main sequence line (optional - you can customize this)
-    mass_range = np.logspace(9, 11.5, 100)
-    
-    # Typical main sequence relation: log(SFR) = 0.8*log(M) - 8.5 (adjust as needed)
-    ms_sfr = 0.8 * np.log10(mass_range) - 6.5
-    
-    ax.plot(mass_range, 10**ms_sfr, 'k--', alpha=0.5, linewidth=2, label='Main Sequence')
+    # Colourbar
+    if gradient == 'absolute':
+        cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
+        cbar.set_label('Number of MIRI detections')
+        cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
+    elif gradient == 'relative':
+        cbar = plt.colorbar(sc, ax=ax)
+        cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+        cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
+        cbar.set_label('Relative number of MIRI detections')
+
+    # MS line and shaded 1-sigma region
+    ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
+    ax.fill_between(logM_grid, logSFR_low, logSFR_high, color='gray', alpha=0.15, label='1σ uncertainty')
+
+    # Labels and legend
+    ax.set_xlabel(r'$\log_{10}(M_\star / M_\odot)$', fontsize=14)
+    ax.set_ylabel(r'$\log_{10}(\mathrm{SFR} / M_\odot\,\mathrm{yr}^{-1})$', fontsize=14)
     ax.legend(loc='lower right')
-    
+    ax.grid(alpha=0.3)
+
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
     print(f"Plot saved as {save_path}")
 
-def plot_z_mass_parameter_space(zreds, logmasses, ndetections, color_scheme='viridis', save_path='z_mass_parameter_space.png'):
+def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme='plasma', gradient='absolute', save_path='z_mass_parameter_space.png'):
     """
     Plot z-M parameter space
     
@@ -801,78 +803,138 @@ def plot_z_mass_parameter_space(zreds, logmasses, ndetections, color_scheme='vir
         Redshift values
     logmasses : array-like
         Log stellar masses
-    ndetections : array-like
-        Number of MIRI detections per galaxy
+    detections : dict-like
+        Available filters with True/False
     color_scheme : str
         Color scheme to use
+    gradient : str
+        Specify whether to use absolute or relative detections for the colorbar
     save_path : str
         Path to save the plot
     """
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(6, 4))
     
-    colors = get_color_scheme(color_scheme)
-    cmap = ListedColormap(colors)
+    #colors = get_color_scheme(color_scheme)
+    #cmap = ListedColormap(colors)
     
-    sc = ax.scatter(zreds, logmasses, c=ndetections, 
-                   cmap=cmap, s=80, alpha=0.8,
-                   edgecolor='black', linewidth=0.5,
-                   vmin=0, vmax=len(colors)-1)
+    if gradient == 'absolute':
+        cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
+        bounds = np.arange(-0.5, 5.5, 1)
+        norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
+        N_detected = []
+        for det in detections: 
+            N_detected.append(sum(det.values()))
+        N_detected = np.array(N_detected)
+        sc = plt.scatter(zreds, logmasses, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8)
+        
+        cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
+        cbar.set_label('Number of MIRI detections')
+        cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
+        
+        detected = N_detected > 0
+        # Add sample statistics as text
+        ax.text(0.78, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+    elif gradient == 'relative':  
+        N_detected = []
+        N_available = []
+        for det in detections: 
+            N_detected.append(sum(det.values()))
+            N_available.append(len(det.values()))
+        N_detected = np.array(N_detected)
+        N_available = np.array(N_available)
+        f_det = N_detected / N_available  # fraction 0-1  
+        
+        cmap = plt.get_cmap(color_scheme)
+
+        sc = ax.scatter(zreds, logmasses, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
+
+        cbar = plt.colorbar(sc, ax=ax)
+        cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+        cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
+        cbar.set_label('Relative number of MIRI detections')
+        
+        detected = N_detected > 0
+        # Add sample statistics as text
+        ax.text(0.78, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
+                transform=ax.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
+    elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
+        flux_array = []
+        mask = []
+        band = gradient.upper()
+        
+        for det_dict, flux_dict in zip(detections, data):
+            if det_dict.get(band, False) and band in flux_dict:
+                flux_array.append(flux_dict[band])
+                mask.append(True)
+            else:
+                flux_array.append(np.nan)
+                mask.append(False)
+        
+        mask = np.array(mask)
+
+        # Apply mask to all quantities
+        flux_array = np.array(flux_array)[mask]*1e6
+        zreds = np.array(zreds)[mask]
+        logmasses = np.array(logmasses)[mask]
+
+        # Convert flux to log scale
+        log_flux_array = np.log10(flux_array)
+
+        # Create scatter plot coloured by log flux
+        sc = ax.scatter(zreds, logmasses, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8)
+        
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
+        save_path = save_path + f'zM_{gradient}_v2.png'
+        ax.set_xlim(1.5, 3.75)
+        ax.set_ylim(9, 12)
+    
+    elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
+        nsig_array = []
+        mask = []
+        band = gradient.split('_')[1].upper()
+        
+        for det_dict, nsig_dict in zip(detections, data):
+            if det_dict.get(band, False) and band in nsig_dict:
+                nsig_array.append(nsig_dict[band])
+                mask.append(True)
+            else:
+                nsig_array.append(np.nan)
+                mask.append(False)
+        
+        mask = np.array(mask)
+
+        # Apply mask to all quantities
+        nsig_array = np.array(nsig_array)[mask]
+        zreds = np.array(zreds)[mask]
+        logmasses = np.array(logmasses)[mask]
+        
+        # Create scatter plot coloured by log flux
+        sc = ax.scatter(zreds, logmasses, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7)
+        
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf'$N_\sigma$ ({band})')
+        save_path = save_path + f'zM_{gradient}.png'
+        ax.set_xlim(1.5, 3.75)
+        ax.set_ylim(9, 12)
+        
+    
+    else:
+        print("⚠️Gradient has to be set to either absolute, relative or flux.")
+        return None
+          
+        
     ax.set_xlabel('Redshift (z)', fontsize=14)
     ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
-    ax.set_title('z-M Parameter Space', fontsize=16, fontweight='bold', pad=20)
+    #ax.set_title('z-M Parameter Space', fontsize=16, fontweight='bold', pad=20)
     ax.grid(True, alpha=0.3)
-    
-    # Colorbar
-    cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
-    cbar.set_label('Number of MIRI Detections', fontsize=12)
-    cbar.set_ticks(np.arange(0, len(colors)))
-    
-    # Add mass completeness line (optional - customize as needed)
-    z_range = np.linspace(zreds.min(), zreds.max(), 100)
-    # Example completeness limit: log(M) = 9.5 + 0.3*z (adjust to your survey)
-    #completeness_limit = 9.5 + 0.3 * z_range
-    #ax.plot(z_range, completeness_limit, 'r--', alpha=0.7, linewidth=2, 
-    #        label='Mass Completeness Limit')
-    #ax.legend(loc='lower right')
-    
+        
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
     print(f"Plot saved as {save_path}")
-
-def plot_all_galaxy_plots(zreds, logmasses, masses, sfr100, ndetections, 
-                         color_scheme='viridis', save_dir='./'):
-    """
-    Generate all three plots at once
-    
-    Parameters:
-    -----------
-    zreds, logmasses, masses, sfr100, ndetections : array-like
-        Your galaxy data arrays
-    color_scheme : str
-        Color scheme for the plots
-    save_dir : str
-        Directory to save plots
-    """
-    print(f"Generating galaxy plots with {len(zreds)} galaxies...")
-    print(f"Redshift range: {zreds.min():.2f} - {zreds.max():.2f}")
-    print(f"Mass range: {masses.min():.2e} - {masses.max():.2e} M☉")
-    print(f"SFR range: {sfr100.min():.2f} - {sfr100.max():.2f} M☉/yr")
-    print(f"Detections: {np.sum(ndetections > 0)}/{len(ndetections)} galaxies detected")
-    print()
-    
-    # Set up publication style
-    setup_publication_style()
-    
-    # Generate all plots
-    plot_mass_vs_redshift(zreds, masses, ndetections, 
-                         save_path=f'{save_dir}/mass_vs_redshift.png')
-    
-    plot_main_sequence(masses, sfr100, ndetections, color_scheme,
-                      save_path=f'{save_dir}/main_sequence.png')
-    
-    plot_z_mass_parameter_space(zreds, logmasses, ndetections, color_scheme,
-                               save_path=f'{save_dir}/z_mass_parameter_space.png')
-    
-    print("All plots generated successfully!")
