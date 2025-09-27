@@ -3,9 +3,11 @@ import glob
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors, Normalize, ListedColormap
+import matplotlib.colors as mcolors
+from matplotlib.colors import Normalize, ListedColormap
 import pickle as pkl
 from datetime import datetime
+from scipy.stats import norm
 import prospect.io.read_results as reader
 from prospect.sources import FastStepBasis
 from prospect.utils.plotting import posterior_samples
@@ -19,7 +21,20 @@ dirout = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outpu
 
 
 def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
-    """Main function to reconstruct and plot PROSPECTOR results with MIRI data"""
+    """Main function to reconstruct and plot PROSPECTOR results with MIRI data
+    
+    Parameters:
+    -----------
+    objid : int
+        Galaxy ID of the object of interest
+    plot_dir : str, optional
+        Directory to store the plots in
+    stats_dir : str, optional
+        Directory to write the fit statistics to
+    add_duste : bool, optional
+        Specify whether dust emission is active or not
+        Defaults to True
+    """
     
     # Load the h5 file for the given objid
     h5_file = glob.glob(os.path.join(dirout, f"output_{objid}*.h5"))
@@ -326,14 +341,36 @@ def plot_photometry(ax, obs, factor=3631e6):
         
 
 def load_and_display(objid, duste=False, mod=None, mod_err=None, outfile=None):
+    """Code to load the fit data from the reconstruct function and plot 
+       quickly without using predict() 
+
+    Args:
+        objid (int): Object ID of the galaxy of interest
+        duste (bool, optional): Specify whether to load files with or without 
+                                dust emission. Defaults to False.
+        mod (ndarray, optional): Model photometry. Defaults to None.
+        mod_err (ndarray, optional): Model uncertainty. Defaults to None.
+        outfile (str, optional): Path to output figure. Defaults to None.
+        
+    Note:  
+        mod and mod_err are only relevant if you want to include your custom model 
+            photometry, e.g. using sedpy to create phototmetry for bands that were
+            not used to fit and hence prospector doesn't return a model for them.
+        
+       
+    """
     
     if duste == False:
         path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_files/{objid}.pkl'
     else:
         path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_nodust/{objid}.pkl'
-    
-    with open(path_to_pkl, 'rb') as f:
-        fit_data = pkl.load(f)
+
+    try:    # try to open
+        with open(path_to_pkl, 'rb') as f:
+            fit_data = pkl.load(f)
+    except FileNotFoundError:
+        print(f"⚠️ Attention: File {path_to_pkl} not found. Skipping...")
+        return
     
     zred = fit_data['redshift']
     print(f"Loading fit data of galaxy {objid} at redshift {zred}")
@@ -364,7 +401,7 @@ def load_and_display(objid, duste=False, mod=None, mod_err=None, outfile=None):
     phot *= factor  # convert to µJy
     
     # Initialise the plot
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(8, 5))
 
     # Plot 1 sigma confidence interval
     ax.fill_between(wave_spec, lower, upper, color='crimson', alpha=0.2, label='1σ uncertainty')
@@ -411,13 +448,14 @@ def load_and_display(objid, duste=False, mod=None, mod_err=None, outfile=None):
 
     # Set limits
     ax.set_ylim(ymin_plot, ymax_plot)
-
+    
     # Plot formatting
-    ax.set_xlabel('Observed Wavelength (µm)')
-    ax.set_ylabel('Flux (µJy)')
+    ax.set_xlabel('Observed Wavelength (µm)', fontsize=13)
+    ax.set_ylabel('Flux (µJy)', fontsize=13)
     ax.set_xlim(0.4, 35)    
     ax.set_xscale('log')
     ax.set_yscale('log')
+    ax.tick_params(axis='both', which='major', labelsize=13)
     ax.legend()
     
     plt.tight_layout()
@@ -474,7 +512,6 @@ def create_hist(csv_path, out_dir, bins=25):
     for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
         subset = df[df['filter_name'] == f]
         
-        ax.hist(subset['N_sigma'], bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
         ax.set_title(f'{bands[i]}')
         ax.set_xlim(x_min, x_max)
         ax.set_xlabel(r'$N_\sigma$')
@@ -486,11 +523,21 @@ def create_hist(csv_path, out_dir, bins=25):
         std_ratio = np.std(nsigmas)
         N = len(subset['galaxy_id'].unique())
         num = f'N = {N}'
+        
+        counts, bin_edges, _ = ax.hist(nsigmas, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
 
+        x = np.linspace(x_min, x_max, 500)
+        gaussian = norm.pdf(x, loc=0, scale=1)
+
+        # Scale Gaussian to match histogram counts
+        gaussian_scaled = gaussian * len(nsigmas) * (bin_edges[1] - bin_edges[0])
+
+        ax.plot(x, gaussian_scaled, 'black', lw=2, alpha=0.6, label=r'$\mathcal{N}(0,1)$')
+        
         median_ratio = np.median(nsigmas)
         
         stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
-            
+        ax.legend()
         ax.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         
@@ -501,9 +548,8 @@ def create_hist(csv_path, out_dir, bins=25):
         
     #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-
     # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_all_filters.png')
+    filename = os.path.join(out_dir, 'Nsigma_all_filters_gauss.png')
     plt.savefig(filename, dpi=300)
     plt.show()
     
@@ -887,12 +933,9 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
     save_path : str
         Path to save the plot
     """
-    fig, ax = plt.subplots(figsize=(6, 4))
-    
-    #colors = get_color_scheme(color_scheme)
-    #cmap = ListedColormap(colors)
     
     if gradient == 'absolute':
+        fig, ax = plt.subplots(figsize=(10, 5))
         cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
         bounds = np.arange(-0.5, 5.5, 1)
         norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
@@ -900,7 +943,7 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         for det in detections: 
             N_detected.append(sum(det.values()))
         N_detected = np.array(N_detected)
-        sc = plt.scatter(zreds, logmasses, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8)
+        sc = plt.scatter(zreds, logmasses, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8, edgecolor='black')
         
         cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
         cbar.set_label('Number of MIRI detections')
@@ -912,7 +955,10 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
                 transform=ax.transAxes, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
         
-    elif gradient == 'relative':  
+        save_path = save_path + f'zM_{gradient}.png'
+        
+    elif gradient == 'relative': 
+        fig, ax = plt.subplots(figsize=(10, 5)) 
         N_detected = []
         N_available = []
         for det in detections: 
@@ -936,8 +982,11 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         ax.text(0.78, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
                 transform=ax.transAxes, verticalalignment='top',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-    
+
+        save_path = save_path + f'zM_{gradient}.png'
+        
     elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
+        fig, ax = plt.subplots(figsize=(6, 4))
         flux_array = []
         mask = []
         band = gradient.upper()
@@ -966,15 +1015,16 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         elif gradient == 'f2100w': color_scheme = "Reds"
 
         # Create scatter plot coloured by log flux
-        sc = ax.scatter(zreds, logmasses, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8)
+        sc = ax.scatter(zreds, logmasses, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
         
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
-        save_path = save_path + f'zM_{gradient}_v2.png'
+        save_path = save_path + f'zM_{gradient}.png'
         ax.set_xlim(1.5, 3.75)
         ax.set_ylim(9, 12)
     
     elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
+        fig, ax = plt.subplots(figsize=(6, 4))
         nsig_array = []
         mask = []
         band = gradient.split('_')[1].upper()
@@ -995,11 +1045,11 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         logmasses = np.array(logmasses)[mask]
         
         # Create scatter plot coloured by log flux
-        sc = ax.scatter(zreds, logmasses, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7)
+        sc = ax.scatter(zreds, logmasses, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7, edgecolor='black')
         
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(rf'$N_\sigma$ ({band})')
-        save_path = save_path + f'zM_{gradient}.png'
+        save_path = save_path + f'zM_{gradient}_r.png'
         ax.set_xlim(1.5, 3.75)
         ax.set_ylim(9, 12)
         
