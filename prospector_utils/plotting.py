@@ -36,6 +36,8 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         Defaults to True
     """
     
+    print(f"Processing galaxy {objid} =============================")
+    
     # Load the h5 file for the given objid
     h5_file = glob.glob(os.path.join(dirout, f"output_{objid}*.h5"))
     
@@ -74,7 +76,6 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         
     # Get accurate redshifts from the MAP (obtained by MJ)    
     zred = map_parameters[0]
-    print(f"Processing galaxy {objid} at redshift z = {zred}")
 
     # Build model matching original setup    
     # Somehow this works if zred=objid and waverange=zred, but not if I pass the arguments correctly
@@ -159,7 +160,7 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     #    print(f"{f.name}: {phot} maggies")
         
     # Initialise the plot
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(8, 5))
     
     #########   PLOT POSTERIOR SAMPLES     #########
     
@@ -228,15 +229,17 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     ax.set_ylim(ymin_plot, ymax_plot)
 
     # Plot formatting
-    ax.set_xlabel('Observed Wavelength (µm)')
-    ax.set_ylabel('Flux (µJy)')
+    ax.set_xlabel('Observed Wavelength (µm)', fontsize=13)
+    ax.set_ylabel('Flux (µJy)', fontsize=13)
     ax.set_xlim(0.4, 35)#200)    # Change x range    
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.legend()
+    ax.tick_params(axis='both', which='major', labelsize=13)
+
     
     zred_rounded = np.round(zred,2)
-    plt.title(f"Galaxy {objid} at z={zred_rounded}")
+    #plt.title(f"Galaxy {objid} at z={zred_rounded}")
     plt.tight_layout()
     
     if plot_dir:
@@ -482,7 +485,7 @@ def create_hist(csv_path, out_dir, bins=25):
     os.makedirs(out_dir, exist_ok=True)
 
     # Compute global x-axis limits (clip outliers if needed)
-    x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
+    #x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
     x_min = -8.5
     x_max = 8.5
     bins = np.linspace(x_min, x_max, 25)
@@ -513,9 +516,12 @@ def create_hist(csv_path, out_dir, bins=25):
         subset = df[df['filter_name'] == f]
         
         ax.set_title(f'{bands[i]}')
-        ax.set_xlim(x_min, x_max)
+        #ax.set_xlim(x_min, x_max)
         ax.set_xlabel(r'$N_\sigma$')
         ax.set_ylabel('Number of galaxies')
+        
+        #if i in [0,1]: ax.set_ylim(0, 24)
+        #elif i in [2,3]: ax.set_ylim(0,12)
 
         nsigmas = subset['N_sigma']
         # Add compact statistics
@@ -527,12 +533,15 @@ def create_hist(csv_path, out_dir, bins=25):
         counts, bin_edges, _ = ax.hist(nsigmas, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
 
         x = np.linspace(x_min, x_max, 500)
-        gaussian = norm.pdf(x, loc=0, scale=1)
+        gaussian_norm = norm.pdf(x, loc=0, scale=1)
+        gaussian_obs = norm.pdf(x, loc=mean_ratio, scale=std_ratio)
 
-        # Scale Gaussian to match histogram counts
-        gaussian_scaled = gaussian * len(nsigmas) * (bin_edges[1] - bin_edges[0])
-
-        ax.plot(x, gaussian_scaled, 'black', lw=2, alpha=0.6, label=r'$\mathcal{N}(0,1)$')
+        # Scale Gaussians to match histogram counts
+        gaussian_norm_scaled = gaussian_norm * len(nsigmas) * (bin_edges[1] - bin_edges[0])
+        gaussian_obs_scaled = gaussian_obs * len(nsigmas) * (bin_edges[1] - bin_edges[0])
+        
+        ax.plot(x, gaussian_norm_scaled, 'gray', lw=2, alpha=1, label=r'$\mathcal{N}(0,1)$')
+        ax.plot(x, gaussian_obs_scaled, colors[i], lw=2, alpha=1, label=r'$\mathcal{N}'+f'({mean_ratio:.2f},{std_ratio:.2f})$')
         
         median_ratio = np.median(nsigmas)
         
@@ -549,35 +558,9 @@ def create_hist(csv_path, out_dir, bins=25):
     #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_all_filters_gauss.png')
+    filename = os.path.join(out_dir, 'Nsigma_all_filters_gauss_v2.png')
     plt.savefig(filename, dpi=300)
     plt.show()
-    
-    for f in filters:
-        subset = df[df['filter_name'] == f]
-
-        plt.figure(figsize=(6,4))
-        plt.hist(subset['N_sigma'], bins=bins, color='skyblue', alpha=0.7, edgecolor='black')
-        plt.xlabel(r'$N_\sigma$')
-        plt.ylabel('Number of galaxies')
-        plt.title(rf'$N_\sigma$ distribution for {f}')
-        plt.xlim(x_min, x_max)
-        plt.tight_layout()
-        
-        # Count how many galaxies are in this filter
-        n_galaxies = len(subset['galaxy_id'].unique())
-        # Annotate in the top-right corner (adjust x,y if needed)
-        plt.text(0.95, 0.95, f'N = {n_galaxies}',
-            transform=plt.gca().transAxes,  # coordinates relative to the axes (0–1)
-            ha='right', va='top',
-            fontsize=10,
-            bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-        
-        # Save each histogram with the filter name
-        filename = os.path.join(out_dir, f'{f}_Nsigma_abs.png')
-        plt.savefig(filename, dpi=300)
-        plt.show()
-        plt.close()
     
     # Plot histograms for galaxies    
     galaxies = df['galaxy_id'].unique()
@@ -786,10 +769,10 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
     logSFR_high = (slope + slope_err) * logM_grid + (intercept + intercept_err)
     logSFR_low  = (slope - slope_err) * logM_grid + (intercept - intercept_err)
     
-    # Now let's introduce the plot
-    fig, ax = plt.subplots(figsize=(6, 4))
+    # Now let's introduce the plot   
     
     if gradient == 'absolute':
+        fig, ax = plt.subplots(figsize=(10, 5))
         cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
         bounds = np.arange(-0.5, 5.5, 1)
         norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
@@ -799,7 +782,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         N_detected = np.array(N_detected)
         
         # Scatter plot
-        sc = plt.scatter(logM, logSFR_sample, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8)
+        sc = plt.scatter(logM, logSFR_sample, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8, edgecolor='black')
         
         # Colorbar
         cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
@@ -808,6 +791,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         save_path += f'sfms_{gradient}.png'
         
     elif gradient == 'relative':  
+        fig, ax = plt.subplots(figsize=(10, 5))
         cmap = plt.get_cmap(color_scheme)
         N_detected = []
         N_available = []
@@ -829,6 +813,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         save_path += f'sfms_{gradient}.png'
     
     elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
+        fig, ax = plt.subplots(figsize=(6, 4))
         flux_array = []
         mask = []
         band = gradient.upper()
@@ -857,7 +842,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         elif gradient == 'f2100w': color_scheme = "Reds"
 
         # Create scatter plot coloured by log flux
-        sc = ax.scatter(logM, logSFR_sample, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8)
+        sc = ax.scatter(logM, logSFR_sample, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
         
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
@@ -866,6 +851,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         save_path += f'sfms_{gradient}.png'
         
     elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
+        fig, ax = plt.subplots(figsize=(6, 4))
         nsig_array = []
         mask = []
         band = gradient.split('_')[1].upper()
@@ -888,7 +874,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         logSFR_sample = np.array(logSFR_sample)[mask]
         
         # Create scatter plot coloured by log flux
-        sc = ax.scatter(logM, logSFR_sample, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7)
+        sc = ax.scatter(logM, logSFR_sample, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7, edgecolor='black')
         
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(rf'$N_\sigma$ ({band})')
@@ -904,8 +890,8 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
     ax.fill_between(logM_grid, logSFR_low, logSFR_high, color='gray', alpha=0.15, label='1σ uncertainty')
 
     # Labels and legend
-    ax.set_xlabel(r'$\log_{10}(M_\star / M_\odot)$', fontsize=14)
-    ax.set_ylabel(r'$\log_{10}(\mathrm{SFR} / M_\odot\,\mathrm{yr}^{-1})$', fontsize=14)
+    ax.set_xlabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
+    ax.set_ylabel(r'$\log_{10}(\mathrm{SFR} / $M$_\odot\,\mathrm{yr}^{-1})$', fontsize=14)
     ax.legend(loc='lower right')
     ax.grid(alpha=0.3)
 

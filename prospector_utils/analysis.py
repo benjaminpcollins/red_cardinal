@@ -7,8 +7,6 @@ from datetime import datetime
 import pandas as pd
 import fsps
 import prospect.io.read_results as reader
-from prospect.sources import FastStepBasis
-from prospect.utils.plotting import posterior_samples
 from .params import build_obs, build_model, get_MAP
 from .plotting import load_and_display
 from sedpy.observate import getSED
@@ -16,7 +14,6 @@ from astropy import constants as const
 from astropy.io import fits
 import pyphot
 from astropy.cosmology import WMAP9 as cosmo
-from astropy.table import Table
 from prospect.models.transforms import logsfr_ratios_to_sfrs
 
 
@@ -92,6 +89,7 @@ def compute_residuals(objid, show_plot=True):
     filters_all = obs['filters_all']
     
     if len(filters) == len(filters_all):
+        print("⚠️It seems like there are no MIRI data available...Skipping")
         return None  # No MIRI bands, nothing to do
     
     wave_phot_all = obs['phot_wave_all']
@@ -122,22 +120,14 @@ def compute_residuals(objid, show_plot=True):
     # Calculate the ratio between my model photometry and the Prospector model photometry
     ratio = phot_new / phot
     
-    print("Ratio between model photometries: ", ratio)
-    print("median ratio:", np.median(ratio))
-    print("mean ratio  :", np.mean(ratio))
-    print("std ratio   :", np.std(ratio))
-    
     phot_new_all /= ratio.mean()  # normalise to match
     phot_84th /= ratio.mean()
     phot_16th /= ratio.mean()
     
     # Extract model predictions at MIRI bands
-    miri_mask = (wave_phot_all > 75000) & (wave_phot_all < 210000)  # AA
+    miri_mask = (wave_phot_all > 75000) & (wave_phot_all < 300000)  # AA
     model_flux = phot_new_all[miri_mask]
     model_err  = 0.5 * (phot_84th[miri_mask] - phot_16th[miri_mask]) # approximate error for the prospector fit
-    
-    if show_plot:
-        load_and_display(objid, mod=model_flux, mod_err=model_err)
     
     # Extract obs at MIRI bands
     obs_wave = obs['phot_wave_all']
@@ -148,8 +138,10 @@ def compute_residuals(objid, show_plot=True):
     obs_flux = obs_flux[miri_mask]
     obs_err  = obs_err[miri_mask]
 
+    if show_plot: load_and_display(objid, mod=model_flux, mod_err=model_err, outfile=f"/Users/benjamincollins/University/Master/Red_Cardinal/prospector/fits_v3/{objid}.png")
+
     # Compute N_sigma
-    delta = np.abs(obs_flux - model_flux)
+    delta = obs_flux - model_flux
     
     # Compute it also in percentage of observed MIRI flux
     perc = delta / obs_flux
@@ -163,7 +155,7 @@ def compute_residuals(objid, show_plot=True):
     rows = []
     for f, lam, nsig, obs, obs_err, mod, mod_err, p in zip(
         miri_bands, obs_wave, N_sigma, obs_flux, obs_err, model_flux, model_err, perc
-    ):
+    ):   
     
         rows.append({
             "galaxy_id": objid,
@@ -182,6 +174,9 @@ def compute_residuals(objid, show_plot=True):
     
     print("Sigmas: ", N_sigma)
     print("Percentage difference:", perc)
+    
+    if objid == '8465': 
+        print("⚠️ Found galaxy with ID 8465, printing stats")
     
     return rows
 
@@ -272,6 +267,27 @@ def get_galaxy_properties(gid, non_detections=None):
     for band in filters:
         if non_detections is not None and gid in non_detections.get(band, []):
             detected[band] = False
+            
+    # ============================
+    # Part related to the fit quality
+    # ============================
+    
+    csv_path = '/Users/benjamincollins/University/Master/Red_Cardinal/prospector/analysis/residuals_abs.csv'
+    df = pd.read_csv(csv_path)
+    subset = df[df['galaxy_id'] == gid]
+    nsig = subset['N_sigma']
+    
+    # Compute reduced chi^2 per galaxy
+    n_filters = len(subset)
+    
+    # for undetected galaxies there are 0 valid MIRI bands
+    if n_filters == 0:
+        chi2_red = np.nan
+    else:
+        chi2_red = np.sum(nsig**2) / n_filters           
+
+    perc_diff = subset['perc_diff']
+    
     
     galaxy_data = {
         "gid": gid,
@@ -281,7 +297,10 @@ def get_galaxy_properties(gid, non_detections=None):
         "sfr_last100": sfr_last100,       # averaged over last 100 Myr
         "fluxes": dict(zip(filters, flux)),
         "errors": dict(zip(filters, err)),
-        "detections": detected
+        "detections": detected,
+        "nsig": dict(zip(filters, nsig)),
+        "chi2_red": chi2_red,
+        "frac_diff": dict(zip(filters, perc_diff))
     }
     
     return galaxy_data
