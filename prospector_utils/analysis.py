@@ -221,6 +221,21 @@ def get_galaxy_properties(gid, non_detections=None):
 
     zred = MAP['zred']
     logmass = MAP['logmass']
+    dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
+    
+    """
+    dust_tesc – (default: 7.0) 
+        Stars younger than dust_tesc are attenuated by both dust1 and dust2, 
+            while stars older are attenuated by dust2 only. Units are log(yrs).
+    dust1 – (default: 0.0) 
+        Dust parameter describing the attenuation of young stellar light, 
+            i.e. where t <= dust_tesc (for details, see Conroy et al. 2009a).
+    dust2 – (default: 0.0) 
+        Dust parameter describing the attenuation of old stellar light, 
+        i.e. where t > dust_tesc (for details, see Conroy et al. 2009a).
+
+    Summary taken from https://dfm.io/python-fsps/current/stellarpop_api/#fsps.StellarPopulation.dust_mass
+    """ 
 
     # Reconstruct agebins used in the fits
     tuniv = cosmo.age(zred).value
@@ -294,6 +309,7 @@ def get_galaxy_properties(gid, non_detections=None):
         "zred": zred,
         "logmass": logmass,
         "sfrs": sfrs,                     # SFR in each bin
+        "dust": dust2,
         "sfr_last100": sfr_last100,       # averaged over last 100 Myr
         "fluxes": dict(zip(filters, flux)),
         "errors": dict(zip(filters, err)),
@@ -304,8 +320,42 @@ def get_galaxy_properties(gid, non_detections=None):
     }
     
     return galaxy_data
-    
-    
 
+
+def get_extremes(values, gids, n=2, abs=False, dropna=True):
+    """
+    Return the lowest and highest n values (with IDs).
     
-    
+    Parameters
+    ----------
+    values : array-like
+        Array of values (e.g. dust, nsig).
+    gids : array-like
+        IDs corresponding to the values.
+    n : int
+        Number of extremes per side.
+    dropna : bool
+        If True, filter out NaN values first.
+        
+    Returns
+    -------
+    dict with keys "lowest" and "highest", 
+    each containing list of (id, value) tuples.
+    """
+    vals = np.array(values)
+    ids  = np.array(gids)
+
+    if dropna:
+        mask = ~np.isnan(vals)
+        vals, ids = vals[mask], ids[mask]
+
+    if abs == True:
+        vals2 = np.abs(vals)
+    else:
+        vals2 = np.copy(vals)
+            
+    order = np.argsort(vals2)
+    lowest  = [(ids[i], vals[i]) for i in order[:n]]
+    highest = [(ids[i], vals[i]) for i in order[-n:]]
+
+    return {"lowest": lowest, "highest": highest}

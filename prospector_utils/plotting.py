@@ -15,6 +15,13 @@ from .params import build_obs, build_model, get_MAP
 from astropy.cosmology import Planck18 as cosmo
 from astropy import units as u
 
+from astropy.io import fits
+from astropy.visualization import ZScaleInterval, ImageNormalize, AsinhStretch
+
+from matplotlib.image import imread
+
+from miri_utils.photometry_tools import load_vis
+
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
 dirout = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
@@ -114,8 +121,8 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     #print(f"New parameters length: {len(new_map_parameters)}")
     #print(f"New model expects: {model.ndim} parameters")
     
-    #for a,b in zip(results['theta_labels'],map_parameters):
-    #    print(a, b)
+    for a,b in zip(results['theta_labels'],map_parameters):
+        print(a, b)
     
     #print("Adjusted length of map_parameters: ", len(map_parameters), "\n")
 
@@ -149,15 +156,6 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     residuals = ratio - corr_factor
     weighted_var = np.sum(weights * residuals**2) / np.sum(weights)
     corr_uncertainty = np.sqrt(weighted_var / len(ratio))
-    
-    #print("Mean ratio between photometries: ", corr_factor)
-    #print("Standard deviation: ", corr_uncertainty)
-    
-    #for f, phot in zip(obs['filters'], maggies):
-    #    print(f"{f.name}: {phot} maggies")
-        
-    #for f, phot in zip(obs['filters_all'], obs['maggies_all']):
-    #    print(f"{f.name}: {phot} maggies")
         
     # Initialise the plot
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -1054,3 +1052,144 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.show()
     print(f"Plot saved as {save_path}")
+
+
+def plot_nsigma_vs_params(nsig, band, log_ssfr, dust, save_path=None):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # --- Left: Nsigma vs sSFR
+    sc1 = axes[0].scatter(log_ssfr, nsig, c=dust, cmap="viridis", alpha=0.7, edgecolor='black')
+    axes[0].axhline(0, ls="--", c="grey")
+    axes[0].set_xlabel(r'$\log(\mathrm{sSFR}_{100}\,[\mathrm{yr}^{-1}])$')
+    axes[0].set_ylabel(r'$N_\sigma$')
+    axes[0].set_title(f'{band}: ' + r'$\mathrm{N_\sigma}$ vs sSFR')
+    cb1 = fig.colorbar(sc1, ax=axes[0])
+    cb1.set_label("Dust attenuation (dust2)")
+    
+    # --- Right: Nsigma vs Dust
+    sc2 = axes[1].scatter(dust, nsig, c=log_ssfr, cmap="plasma", alpha=0.7, edgecolor='black')
+    axes[1].axhline(0, ls="--", c="grey")
+    axes[1].set_xlabel(r'Dust attenuation ($\mathrm{dust2}$)')
+    axes[1].set_ylabel(r'$N_\sigma$')
+    axes[1].set_title(f'{band}: ' + r'$\mathrm{N_\sigma}$ vs $\mathrm{A_V}$')
+    cb2 = fig.colorbar(sc2, ax=axes[1])
+    cb2.set_label(r'$\log(\mathrm{sSFR}_{100})$')
+    
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+
+def plot_extremes(objid, base_paths, add_fit=False, save_path=None):
+    """
+    Plot dynamic cutouts + Prospector fit for one galaxy.
+    
+    Parameters
+    ----------
+    objid : int or str
+        Galaxy ID
+    base_paths : dict
+        Dictionary of paths with keys: "miri", "nircam", "prospector"
+    show_fit : bool, optional
+        Decide whether or not to add the PROSPECTOR fit to the figure
+    save_path : bool, optional
+        Specify save path for the figure
+    """
+
+    # --- Paths ---
+    nircam_path = os.path.join(base_paths["nircam"], f"{objid}_F444W_cutout.fits")
+    miri_paths = {
+        band: os.path.join(base_paths["miri"], f"{objid}_{band}.h5")
+        for band in ["F1800W", "F2100W"]
+    }
+    
+    prospector_path = os.path.join(base_paths["prospector"], f"{objid}.png")
+
+    # --- Check availability ---
+    available_miri = [b for b, p in miri_paths.items() if os.path.exists(p)]
+    if not available_miri:
+        print(f"Skipping {objid} — no MIRI cutouts found")
+        return
+
+    nircam_exists = os.path.exists(nircam_path)
+    prospector_exists = os.path.exists(prospector_path)
+
+    # --- Case 1: one MIRI band ---
+    if len(available_miri) == 1:
+        if add_fit == True:
+            fig, axes = plt.subplots(1, 3, figsize=(12, 4), gridspec_kw={"width_ratios":[1,1,1.7]})
+            f444w_ax, miri_ax, prosp_ax = axes
+        else:
+            fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+            f444w_ax, miri_ax = axes
+
+        if nircam_exists:
+            show_fits_cutout(nircam_path, f444w_ax, f"{objid} - F444W")
+        else:
+            f444w_ax.axis("off")
+
+        show_h5_cutout(miri_paths[available_miri[0]], miri_ax, f"{objid} - {available_miri[0]}")
+
+        if add_fit == True:
+            if prospector_exists:
+                show_png(prospector_path, prosp_ax, f"{objid} - Prospector Fit")
+            else:
+                prosp_ax.axis("off")
+
+    # --- Case 2: both MIRI bands ---
+    elif len(available_miri) == 2:
+        if add_fit == True:
+            fig, axes = plt.subplots(1, 4, figsize=(16, 4), gridspec_kw={"width_ratios":[1,1,1,1.7]})
+            ax_f444w, ax_f1800w, ax_f2100w, ax_prosp = axes
+        else:
+            fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+            ax_f444w, ax_f1800w, ax_f2100w = axes
+
+        if nircam_exists:
+            show_fits_cutout(nircam_path, ax_f444w, f"{objid} - F444W")
+        else:
+            ax_f444w.axis("off")
+
+        show_h5_cutout(miri_paths["F1800W"], ax_f1800w, f"{objid} - F1800W")
+        show_h5_cutout(miri_paths["F2100W"], ax_f2100w, f"{objid} - F2100W")
+
+        if add_fit:
+            if prospector_exists:
+                show_png(prospector_path, ax_prosp, f"{objid} - Prospector Fit")
+            else:
+                ax_prosp.axis("off")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path)
+    plt.show()
+
+
+# --- Helpers ---
+def show_fits_cutout(path, ax, title):
+    img = fits.getdata(path)
+    interval = ZScaleInterval()
+    vmin, vmax = interval.get_limits(img)
+    norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch())
+    ax.imshow(img, origin="lower", cmap="inferno", norm=norm)
+    ax.set_title(title)
+    ax.axis("off")
+
+def show_h5_cutout(path, ax, title):
+    import h5py
+    with h5py.File(path, "r") as f:
+        img_bkgsub = f["background_subtracted"][:]
+    interval = ZScaleInterval()
+    vmin, vmax = interval.get_limits(img_bkgsub)
+    norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=AsinhStretch())
+    ax.imshow(img_bkgsub, origin="lower", cmap="inferno", norm=norm)
+    ax.set_title(title)
+    ax.axis("off")
+
+def show_png(path, ax, title):
+    img = imread(path)
+    ax.imshow(img)
+    #ax.set_title(title)
+    ax.axis("off")
