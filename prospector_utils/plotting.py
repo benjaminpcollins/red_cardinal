@@ -20,8 +20,6 @@ from astropy.visualization import ZScaleInterval, ImageNormalize, AsinhStretch
 
 from matplotlib.image import imread
 
-from miri_utils.photometry_tools import load_vis
-
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
 dirout = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
@@ -484,9 +482,7 @@ def create_hist(csv_path, out_dir, bins=25):
 
     # Compute global x-axis limits (clip outliers if needed)
     #x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
-    x_min = -8.5
-    x_max = 8.5
-    bins = np.linspace(x_min, x_max, 25)
+    
 
     filters = df['filter_name'].unique()
 
@@ -506,12 +502,17 @@ def create_hist(csv_path, out_dir, bins=25):
     filters_sorted = sorted(filters,
                             key=lambda f: filter_wavelengths.get(f, np.inf))
 
+    unreliable = [12513, 18977]
+
     # Make a 2x2 grid
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True, sharey=True)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 9), sharex=False, sharey=True)
     axes = axes.flatten()  # easier to index
 
     for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
         subset = df[df['filter_name'] == f]
+        
+        for un in unreliable:
+            subset = subset[subset['galaxy_id'] != un]
         
         ax.set_title(f'{bands[i]}')
         #ax.set_xlim(x_min, x_max)
@@ -527,6 +528,10 @@ def create_hist(csv_path, out_dir, bins=25):
         std_ratio = np.std(nsigmas)
         N = len(subset['galaxy_id'].unique())
         num = f'N = {N}'
+        
+        x_min = -8.5
+        x_max = 8.5
+        bins = np.linspace(x_min, x_max, 25)
         
         counts, bin_edges, _ = ax.hist(nsigmas, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
 
@@ -545,7 +550,7 @@ def create_hist(csv_path, out_dir, bins=25):
         
         stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
         ax.legend()
-        ax.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+        ax.text(0.8, 0.75, stats_text, transform=ax.transAxes, fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         
         # Annotate in the top-right corner (adjust x,y if needed)
@@ -556,10 +561,77 @@ def create_hist(csv_path, out_dir, bins=25):
     #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_all_filters_gauss_v2.png')
+    filename = os.path.join(out_dir, 'Nsigma_all_filters_gauss_v4.png')
     plt.savefig(filename, dpi=300)
     plt.show()
     
+    
+    # Make a 2x2 grid
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=False)
+    axes = axes.flatten()  # easier to index
+
+    for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
+        subset = df[df['filter_name'] == f]
+        
+        # Exclude non-detections from the plots    
+        non_detections = {
+            'F770W': [11137, 17793, 8843, 12175, 7696, 7185, 8465, 19098, 12443, 12202, 21547, 9517, 9901, 10415, 12213, 
+                    21451, 11853, 11086, 22606, 18769, 9809, 11481, 21472, 19681, 12513, 21218, 12133, 16615, 10600, 11247, 
+                    20720, 17534, 11723], # Added 11723 since the fit is weird 
+            'F1000W': [17984, 12513, 12164, 12133, 11716, 16615, 16424, 12202, 11723, 11853, 13297, 18327, 12443, 17534], 
+            'F1800W': [12164, 11716, 10565, 10054, 11723, 12175, 19024, 8465, 8338, 18769, 7102, 10400, 12513, 19681, 7904, 
+                    10339, 12133, 10600, 9517, 10415, 11247, 12213, 11451, 7934, 18977], # Added 18977 since the fit is weird 
+            'F2100W': [17984, 12164, 11716, 16516, 11723, 11853, 12175, 16474, 12443, 12513, 12133, 16615, 16424, 12202, 
+                    12332, 17517, 12014, 11247, 13297, 12213, 17916, 17534]
+            }
+        
+        for nd in non_detections[bands[i]]:
+            subset = subset[subset['galaxy_id'] != nd]
+        
+        ax.set_title(f'{bands[i]}')
+        #ax.set_xlim(x_min, x_max)
+        ax.set_xlabel('Fractional difference')
+        ax.set_ylabel('Number of galaxies')
+        
+        #if i in [0,1]: ax.set_ylim(0, 24)
+        #elif i in [2,3]: ax.set_ylim(0,12)
+
+        frac_diffs = subset['perc_diff']
+        
+        for val in frac_diffs:
+            if np.abs(val) > 5.0:
+                print(f"⚠️ Warning: Found extreme fractional difference {val:.2f} in filter {f} for galaxy ID {subset[subset['perc_diff'] == val]['galaxy_id'].values[0]}")
+        
+        # Add compact statistics
+        mean_frac_diff = np.mean(frac_diffs)
+        std_frac_diff = np.std(frac_diffs)
+        N = len(subset['galaxy_id'].unique())
+        num = f'N = {N}'
+        
+        x_min = -6
+        x_max = 2
+        bins = np.linspace(x_min, x_max, 25)
+        
+        ax.hist(frac_diffs, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
+
+        median_frac_diff = np.median(frac_diffs)
+        
+        stats_text = f'μ={mean_frac_diff:.2f}\nσ={std_frac_diff:.2f}\nMed={median_frac_diff:.2f}\n\n{num}'
+        ax.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        #ax.set_ylim(0, 24)
+        # Annotate in the top-right corner (adjust x,y if needed)
+        #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
+        #        transform=ax.transAxes, ha='right', va='top',
+        #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+        
+    #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    # Save single combined figure
+    filename = os.path.join(out_dir, 'frac_diffs_all_filters_v3.png')
+    plt.savefig(filename, dpi=300)
+    plt.show()
+    """
     # Plot histograms for galaxies    
     galaxies = df['galaxy_id'].unique()
 
@@ -585,12 +657,16 @@ def create_hist(csv_path, out_dir, bins=25):
         plt.close()
         print(f"✅ Saved histogram for galaxy {gal} to {filename}")
 
-
+    """
     # Compute reduced chi^2 per galaxy
     reduced_chi2 = []
 
     for gal in df['galaxy_id'].unique():
         subset = df[df['galaxy_id'] == gal]
+        
+        for un in unreliable:
+            subset = subset[subset['galaxy_id'] != un]
+        
         n_filters = len(subset)
         if n_filters > 0:
             chi2 = np.sum(subset['N_sigma']**2) / n_filters           
@@ -607,17 +683,28 @@ def create_hist(csv_path, out_dir, bins=25):
     
     # Count how many chi2 values are in the histogram
     chi2_values = len(chi2_df)
+    num = f'N = {chi2_values}'
     # Annotate in the top-right corner (adjust x,y if needed)
-    plt.text(0.95, 0.95, f'N = {chi2_values}',
-        transform=plt.gca().transAxes,  # coordinates relative to the axes (0–1)
-        ha='right', va='top',
-        fontsize=10,
-        bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+    
+    mean_chi2 = np.mean(chi2_df['reduced_chi2'])
+    std_chi2 = np.std(chi2_df['reduced_chi2'])
+    median_chi2 = np.median(chi2_df['reduced_chi2'])
+    
+    stats_text = f'μ={mean_chi2:.2f}\nσ={std_chi2:.2f}\nMed={median_chi2:.2f}\n\n{num}'
+    
+    plt.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+    
+    # plot vertical lines for mean and median
+    plt.vlines(mean_chi2, ymin=0, ymax=20, color='red', alpha=0.8, linestyle='--', label='Mean')
+    plt.vlines(median_chi2, ymin=0, ymax=15, color='darkred', alpha=0.8, linestyle='--', label='Median')
+    plt.legend()
+    
     plt.tight_layout()
-    filename = os.path.join(out_dir, 'reduced_chi2_hist_notitle.png')
+    filename = os.path.join(out_dir, 'reduced_chi2.png')
     plt.savefig(filename, dpi=300)
     plt.show()
-    
+    """
     chi2_df['n_filters'] = chi2_df['galaxy_id'].apply(
     lambda g: len(df[df['galaxy_id'] == g])
     )
@@ -681,7 +768,7 @@ def create_hist(csv_path, out_dir, bins=25):
 
     print(f"Saved ranked fit quality table to {filename}")
     print(chi2_df_sorted.head(10))  # quick preview
-
+    """
 
 
 """
@@ -720,7 +807,7 @@ def get_color_scheme(scheme_name='viridis'):
     }
     return schemes.get(scheme_name, schemes['viridis'])
 
-def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_scheme='viridis', gradient='absolute', save_path='main_sequence.png'):
+def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='Speagle', color_scheme='viridis', gradient='absolute', save_path='main_sequence.png'):
     """
     Plot the star-forming main sequence
     
@@ -746,26 +833,43 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
     
     # Example galaxy data arrays
     logM = np.log10(masses)          # masses in solar masses
+
+    # Mass grid in log10(M)
+    logM_grid = np.linspace(np.min(logM)-0.1, np.max(logM)+0.1, 200)
+
     logSFR_sample = np.log10(sfr100) # SFR in solar masses per year
 
     # Median redshift for MS line
     t = cosmo.age(zred_ms).to(u.Gyr).value  # cosmic time in Gyr
 
-    # Speagle+14 coefficients
-    slope = 0.84 - 0.026 * t
-    intercept = -(6.51 - 0.11 * t)
+    if ms_type == 'Leja':        
+        
+        a = -0.06707 + 0.3684 * zred_ms - 0.1047 * zred_ms**2
+        b = 0.8552 - 0.1010 * zred_ms - 0.001816 * zred_ms*2
+        c = 0.2148 + 0.8137 * zred_ms - 0.08052 * zred_ms**2
+        log_Mt = 10.29 - 0.1284 * zred_ms + 0.1203 * zred_ms**2
+        
+        logSFR_MS = np.zeros_like(logM_grid)
+        
+        for i, logM_i in enumerate(logM_grid):
+            if logM_i > log_Mt:
+                logSFR_MS[i] = a * (logM_i - log_Mt) + c
+            else:
+                logSFR_MS[i] = b * (logM_i - log_Mt) + c        
+        
+    elif ms_type == 'Speagle':
+        # Speagle+14 coefficients
+        slope = 0.84 - 0.026 * t
+        intercept = -(6.51 - 0.11 * t)
 
-    # 1-sigma errors
-    slope_err = 0.02 + 0.003 * t
-    intercept_err = 0.24 + 0.03 * t
+        # 1-sigma errors
+        slope_err = 0.02 + 0.003 * t
+        intercept_err = 0.24 + 0.03 * t
 
-    # Mass grid in log10(M)
-    logM_grid = np.linspace(np.min(logM)-0.1, np.max(logM)+0.1, 200)
-
-    # Main sequence
-    logSFR_MS = slope * logM_grid + intercept
-    logSFR_high = (slope + slope_err) * logM_grid + (intercept + intercept_err)
-    logSFR_low  = (slope - slope_err) * logM_grid + (intercept - intercept_err)
+        # Main sequence
+        logSFR_MS = slope * logM_grid + intercept
+        logSFR_high = (slope + slope_err) * logM_grid + (intercept + intercept_err)
+        logSFR_low  = (slope - slope_err) * logM_grid + (intercept - intercept_err)
     
     # Now let's introduce the plot   
     
@@ -786,7 +890,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
         cbar.set_label('Number of MIRI detections')
         cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
-        save_path += f'sfms_{gradient}.png'
+        save_path += f'sfms_{gradient}'
         
     elif gradient == 'relative':  
         fig, ax = plt.subplots(figsize=(10, 5))
@@ -808,7 +912,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
         cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
         cbar.set_label('Relative number of MIRI detections')
-        save_path += f'sfms_{gradient}.png'
+        save_path += f'sfms_{gradient}'
     
     elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -846,7 +950,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
         #ax.set_xlim(8, 13)
         ax.set_ylim(-1, 4)
-        save_path += f'sfms_{gradient}.png'
+        save_path += f'sfms_{gradient}'
         
     elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -877,15 +981,22 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, color_sch
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(rf'$N_\sigma$ ({band})')
         ax.set_ylim(-1, 4)
-        save_path += f'sfms_{gradient}.png'
+        save_path += f'sfms_{gradient}'
         
     else:
         print("⚠️Gradient has to be set to either absolute or relative.")
         return None
 
-    # MS line and shaded 1-sigma region
-    ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
-    ax.fill_between(logM_grid, logSFR_low, logSFR_high, color='gray', alpha=0.15, label='1σ uncertainty')
+    if ms_type == 'Leja':
+        # MS line
+        ax.plot(logM_grid, logSFR_MS, 'k--', color='blue', alpha=0.7, label=f'Leja+22 MS (z={zred_ms:.2f})', linewidth=2)
+        ax.plot(logM_grid, logSFR_MS - 1.0, 'k:', color='blue', alpha=0.7, label='1 dex below MS')
+        save_path += f'_Leja.png'
+    elif ms_type == 'Speagle':
+        # MS line and shaded 1-sigma region
+        ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
+        ax.fill_between(logM_grid, logSFR_low, logSFR_high, color='gray', alpha=0.15, label='1σ uncertainty')
+        save_path += f'_Speagle.png'
 
     # Labels and legend
     ax.set_xlabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
