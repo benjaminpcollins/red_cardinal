@@ -180,7 +180,7 @@ def compute_residuals(objid, show_plot=True):
     
     return rows
 
-def get_galaxy_properties(gid, non_detections=None):
+def get_galaxy_properties(gid, phot_miri, non_detections=None):
     """Obtain the star formation rates (SFRs) from the Prospector fit for a given galaxy ID.
 
     Args:
@@ -268,19 +268,57 @@ def get_galaxy_properties(gid, non_detections=None):
     # Part related to the photometry
     # ============================
     
-    # Read the photometry table
-    phot_table = '/Users/benjamincollins/University/master/Red_Cardinal/photometry/phot_tables/Photometry_Table_MIRI.fits'
-    phot_miri = fits.open(phot_table)[1].data
+    # List of all MIRI bands
+    all_bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
+
     ph_miri = phot_miri[phot_miri['ID'] == gid]
-    
-    filters = ph_miri['Filters'][0].split(',')  # e.g. ['F770W', 'F1800W']
-    flux = ph_miri['Flux'][0]         # shape: (n_filters,)
-    err = ph_miri['Flux_Err'][0] # shape: (n_filters,)
-    
-    detected = {band: True for band in filters}
-    
-    for band in filters:
+
+    if len(ph_miri) == 0:
+        print(f"No MIRI entry for galaxy {gid}")
+        return None
+
+    # Filters actually observed for this galaxy
+    filters_available = ph_miri['Filters'][0].split(',')  # e.g., ['F770W', 'F1800W']
+    flux_array = np.ma.filled(ph_miri['Flux'][0], fill_value=np.nan)
+    err_array  = np.ma.filled(ph_miri['Flux_Err'][0], fill_value=np.nan)
+
+    print(f"Flux array: {flux_array}")
+
+    # Initialize dictionaries
+    flux = {}       # Only contains valid fluxes
+    err  = {}
+    detections = {band: False for band in all_bands}  # Default False
+
+    # Fill in values
+    for band, fval, ferr in zip(all_bands, flux_array, err_array):
+        # Check for non-detections
+        is_detected = True
         if non_detections is not None and gid in non_detections.get(band, []):
+            is_detected = False
+        elif np.isnan(fval) or fval < 0:
+            is_detected = False
+
+        detections[band] = is_detected
+
+        if is_detected:
+            flux[band] = fval
+            err[band]  = ferr
+
+    # Example output
+    print(f"Galaxy {gid} fluxes (valid only): {flux}")
+    print(f"Galaxy {gid} detections (all bands): {detections}")
+
+
+    filters = ph_miri['Filters'][0].split(',') # e.g. ['F770W', 'F1800W']
+    
+    print(filters)
+    
+    # Dictionary to track which bands are valid 
+    detected = {band: True for band in filters} 
+    
+    for band in filters: 
+        # If this galaxy is marked as a non-detection in that band 
+        if non_detections is not None and gid in non_detections.get(band, []): 
             detected[band] = False
             
     # ============================
@@ -311,8 +349,8 @@ def get_galaxy_properties(gid, non_detections=None):
         "sfrs": sfrs,                     # SFR in each bin
         "dust": dust2,
         "sfr_last100": sfr_last100,       # averaged over last 100 Myr
-        "fluxes": dict(zip(filters, flux)),
-        "errors": dict(zip(filters, err)),
+        "fluxes": flux,
+        "errors": err,
         "detections": detected,
         "nsig": dict(zip(filters, nsig)),
         "chi2_red": chi2_red,
