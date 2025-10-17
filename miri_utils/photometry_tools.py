@@ -834,6 +834,10 @@ def measure_flux(image_data, error_map, background_median, background_std, backg
     # by the number of pixels within the aperture    
     background_flux = background_median * aperture.area
     
+    # Subtract the background flux from the total flux
+    flux = flux - background_flux
+    print(background_flux)
+    
     # Total flux uncertainty
     total_flux_error = np.sqrt(sum_image_errors**2 + background_std**2)
     
@@ -1324,7 +1328,7 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, nondetections=No
         Number of subplot columns.
     """
     table = Table.read(table_path, format='fits')
-    
+    table.info()
     filter_order = ['F770W', 'F1000W', 'F1800W', 'F2100W']
     pastel_colours = {
         'F770W': '#a6cee3',
@@ -1338,11 +1342,16 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, nondetections=No
     chunk_size = (num_galaxies + 3) // cols
     chunks = [galaxy_ids[i:i + chunk_size] for i in range(0, num_galaxies, chunk_size)]
 
+    print(f"Number of unique IDs in table: {len(set(str(row['ID']) for row in table))}")
+    print(f"Number of IDs in galaxy_ids: {len(galaxy_ids)}")
+    print(f"Chunks: {[len(c) for c in chunks]}")
+
+
     cell_size = 0.5
     num_cols = len(filter_order)
     num_rows = chunk_size
     fig_width = cell_size * num_cols * cols
-    fig_height = cell_size * num_rows * 0.8
+    fig_height = cell_size * num_rows * 0.9
     
     fig, axes = plt.subplots(1, cols, figsize=(fig_width, fig_height), squeeze=False)
     axes = axes[0]
@@ -1411,6 +1420,21 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, nondetections=No
         ax.set_xticklabels(filter_order, rotation=45, ha='right', fontsize=11)
         ax.set_yticks(np.arange(len(g_ids)) + 0.5)
         ax.set_yticklabels(y_labels, fontsize=11)
+        
+        # Add horizontal grid lines
+        for y in np.arange(len(g_ids)):
+            ax.axhline(y=y, color='grey', linestyle='-', linewidth=0.3, alpha=0.5, zorder=10)
+        
+        # Vertical lines at column boundaries
+        for x in np.arange(len(filter_order) + 1):
+            ax.axvline(x=x, color='grey', linestyle='-', linewidth=0.4, alpha=0.6, zorder=10)
+
+        print(f"Plotting {len(g_ids)} galaxies in this panel")
+
+        
+        
+    total_plotted = sum(len(c) for c in chunks)
+    print(f"Total plotted galaxies: {total_plotted}")
 
     plt.suptitle(title, fontsize=28)
     plt.tight_layout()
@@ -1419,7 +1443,7 @@ def plot_galaxy_filter_matrix(table_path, fig_path, title=None, nondetections=No
     plt.show()
 
 
-def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None, summary_doc_path=None, scaling=None):
+def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None, summary_doc_path=None, non_detections=None, scaling=None):
     """
     Compare and contrast two photometric tables WITHOUT APERTURE CORRECTION APPLIED
     and create a comprehensive summary plot of all important statistics and write
@@ -1539,7 +1563,7 @@ def compare_aperture_statistics(table_small_path, table_big_path, fig_path=None,
         print(f'Saved output plot to {fig_path}')
         
     if summary_doc_path:
-        write_aperture_summary(data_comparison, common_ids, summary_doc_path)
+        write_aperture_summary(data_comparison, common_ids, summary_doc_path, non_detections=non_detections)
 
 
 def plot_aperture_comparison(data_comparison, fig_path, scaling=None):
@@ -1721,7 +1745,7 @@ def plot_aperture_comparison(data_comparison, fig_path, scaling=None):
     plt.show()
     plt.close()
     
-def plot_aperture_summary(data_comparison, scaling=False):
+def plot_aperture_summary(data_comparison, non_detections=None, scaling=False):
     
     fig_path = '/Users/benjamincollins/University/Master/Red_Cardinal/photometry/apertures/aperture_comparisons/'
     
@@ -1736,6 +1760,11 @@ def plot_aperture_summary(data_comparison, scaling=False):
     for i, band in enumerate(bands):
         mask = data_comparison['Band'] == band
         
+        if non_detections:
+            non_det_ids = set(str(gid) for gid in non_detections.get(band, []))
+            mask &= ~np.isin(data_comparison['ID'], list(non_det_ids))
+            print(f"Excluding {len(non_det_ids)} non-detections for band {band}")
+        
         # --- (1) Corrected Flux Scatter ---
         ax = axes[i, 0]
         ax.scatter(data_comparison['Flux_Small_Corrected'][mask],
@@ -1749,11 +1778,12 @@ def plot_aperture_summary(data_comparison, scaling=False):
                        np.max(data_comparison['Flux_Big_Corrected'][mask]))
         ax.plot([min_flux, max_flux], [min_flux, max_flux], 'k--', alpha=0.8, label='1:1')
         if scaling: ax.set_xscale('log'); ax.set_yscale('log')
-        ax.set_xlabel(f'Corrected Flux small [µJy]')
-        ax.set_ylabel(f'Corrected Flux large [µJy]')
-        ax.set_title(f'{band} Corrected Flux Comparison')
+        ax.set_xlabel(f'Corrected Flux small [µJy]', fontsize=12)
+        ax.set_ylabel(f'Corrected Flux large [µJy]', fontsize=12)
+        ax.set_title(f'{band} Corrected Flux Comparison', fontsize=14)
         ax.legend()
         ax.grid(alpha=0.3)
+        ax.tick_params(axis='both', which='major', labelsize=12)
         
         # Calculate and display R² correlation
         corr_diff = data_comparison['Corrected_Flux_Difference'][mask]
@@ -1769,31 +1799,30 @@ def plot_aperture_summary(data_comparison, scaling=False):
 
         # Convert masked data to a NumPy array
         ratios = np.array(data_comparison['Corrected_Flux_Ratio'][mask])
-
-        # Define histogram cutoff at 95th percentile
-        cutoff = np.percentile(ratios, 95)
-        ratios_clipped = ratios[ratios <= cutoff]
-
-        #if i == 1: ratios = ratios[ratios < 3.0]
+        
+        for rat in ratios:
+            if rat > 1.5:
+                outlier_id = data_comparison['ID'][mask][ratios == rat][0]
+                print(f"Outlier in {band} with ratio {rat:.2f} for galaxy ID {outlier_id}")
         
         # Plot histogram
-        ax.hist(ratios_clipped, bins=25,
+        ax.hist(ratios, bins=25,
                 alpha=0.7, color=colors[i], edgecolor='black',
                 range=(0, 3.0))
 
         # Reference lines
-        ax.axvline(1.0, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
-        ax.axvline(np.median(ratios), color='darkred', linestyle='-', linewidth=1.5)
+        ax.axvline(1.0, color='red', linestyle='--', linewidth=1.5, alpha=0.8, label='Unity')
+        ax.axvline(np.median(ratios), color='darkred', linestyle='-', linewidth=1.5, label='Median')
 
         # Add compact statistics
         mean_ratio = np.mean(ratios)
         std_ratio = np.std(ratios)
-        num = f'N = {len(ratios_clipped)} (95th pct of {len(ratios)})'
+        num = f'N = {len(ratios)}'
         median_ratio = np.median(ratios)
         
         stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
             
-        ax.text(0.65, 0.77, stats_text, transform=ax.transAxes, fontsize=10,
+        ax.text(0.83, 0.77, stats_text, transform=ax.transAxes, fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
 
         # Annotate number of sources
@@ -1805,51 +1834,64 @@ def plot_aperture_summary(data_comparison, scaling=False):
         #        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.7))
 
         # Labels and formatting
-        ax.set_xlabel('Corrected Flux Ratio (Large/Small)')
-        ax.set_ylabel('Number of Sources')
-        ax.set_title(f'{band} Corrected Flux Ratio Distribution')
+        ax.set_xlabel('Corrected Flux Ratio (Large/Small)', fontsize=12)
+        ax.set_ylabel('Number of Sources', fontsize=12)
+        ax.set_title(f'{band} Corrected Flux Ratio Distribution', fontsize=14)
         ax.legend()
         ax.grid(alpha=0.3)
+        ax.tick_params(axis='both', which='major', labelsize=12)
 
 
     #plt.suptitle('Aperture Photometry Comparison: Short vs Long λ', fontsize=16, y=0.98)
     plt.tight_layout()
     plt.subplots_adjust(top=0.92)
-    figname = os.path.join(fig_path, 'new_stats_thesis_v2.png')
+    figname = os.path.join(fig_path, 'new_stats_thesis_new.png')
     plt.savefig(figname, dpi=200, bbox_inches='tight')
     plt.show()
     plt.close()
     print(f'Saved summary plot to {figname}')
+
+    # Second figure: Flux Ratio vs Brightness
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4))
     
     for i, band in enumerate(bands):
         mask = data_comparison['Band'] == band
         ax = axes[i]
+        
+        if non_detections:
+            non_det_ids = set(str(gid) for gid in non_detections.get(band, []))
+            mask &= ~np.isin(data_comparison['ID'], list(non_det_ids))
+            print(f"Excluding {len(non_det_ids)} non-detections for band {band}")
 
         sc = ax.scatter(
             data_comparison['Flux_Small_Corrected'][mask],
             data_comparison['Corrected_Flux_Ratio'][mask],
             alpha=0.6, s=30,
             c=data_comparison['Apr_Corr_Big'][mask],
-            cmap='viridis'
+            cmap='viridis',
+            edgecolor='black',
+            vmin=1.15, vmax=1.45
         )
 
         # Proper colorbar
         cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label('Large Aperture Correction')
+        cbar.set_label('Aperture Correction Factor (Large)')
 
         ax.axhline(1.0, color='red', linestyle='--', alpha=0.8, label='Unity')
+        ax.axhline(np.median(ratios), color='darkred', linestyle='-', linewidth=1.5, alpha=0.8, label='Median')
+
         if scaling:
             ax.set_xscale('log')
-        ax.set_ylim(0,7.5)
-        ax.set_xlabel(f'{band} Small Aperture Corrected Flux [µJy]')
-        ax.set_ylabel('Flux Ratio (Large/Small)')
-        ax.set_title(f'{band} Flux Ratio vs Brightness')
+        ax.set_ylim(0,4)
+        ax.set_xlabel(f'{band} Small Aperture Corrected Flux [µJy]', fontsize=12)
+        ax.set_ylabel('Flux Ratio (Large/Small)', fontsize=12)
+        ax.set_title(f'{band} Flux Ratio vs Brightness', fontsize=14)
         ax.legend()
         ax.grid(True, alpha=0.3)
+        ax.tick_params(axis='both', which='major', labelsize=12)
 
-    figname = os.path.join(fig_path, 'ratio_vs_brightness.png')
+    figname = os.path.join(fig_path, 'ratio_vs_brightness_thesis_new.png')
     plt.savefig(figname, bbox_inches="tight", pad_inches=0)
     plt.tight_layout()
     plt.show()
@@ -1857,13 +1899,13 @@ def plot_aperture_summary(data_comparison, scaling=False):
     
     
 
-def write_aperture_summary(data_comparison, common_ids, summary_doc_path):
+def write_aperture_summary(data_comparison, common_ids, summary_doc_path, non_detections=None):
     """
     Write a comprehensive aperture comparison summary to a text file.
     Includes raw ratios, aperture corrections, corrected differences,
     fractional differences, and context relative to measurement errors.
     """
-
+    
     doc_path = os.path.join('/Users/benjamincollins/University/Master/Red_Cardinal/photometry/apertures/aperture_comparisons', summary_doc_path)
     
     df = pd.DataFrame(data_comparison)
@@ -1879,6 +1921,14 @@ def write_aperture_summary(data_comparison, common_ids, summary_doc_path):
         for band in bands:
             
             band_data = df[df['Band'] == band]
+            mask = np.ones(len(band_data), dtype=bool)
+            
+            if non_detections:
+                non_det_ids = set(str(gid) for gid in non_detections.get(band, []))
+                mask &= ~np.isin(band_data['ID'], list(non_det_ids))
+                print(f"Excluding {len(non_det_ids)} non-detections for band {band}")
+                
+            band_data = band_data[mask]
 
             file.write(f"\n{band} FILTER:\n")
             file.write("-" * 40 + "\n")
@@ -1967,7 +2017,7 @@ def write_aperture_summary(data_comparison, common_ids, summary_doc_path):
 
 
 
-def plot_appendix_figure(data_comparison, fig_path, scaling=None):
+def plot_appendix_figure(data_comparison, fig_path, non_detections=None, scaling=None):
     """
     Create a compact summary plot for aperture photometry comparison.
     Layout: 4 rows (one per band) × 3 columns
@@ -1989,6 +2039,11 @@ def plot_appendix_figure(data_comparison, fig_path, scaling=None):
     for i, band in enumerate(bands):
         mask = data_comparison['Band'] == band
         band_color = colors[i]
+        
+        if non_detections:
+            non_det_ids = set(str(gid) for gid in non_detections.get(band, []))
+            mask &= ~np.isin(data_comparison['ID'], list(non_det_ids))
+            print(f"Excluding {len(non_det_ids)} non-detections for band {band}")
         
         # Column 1: Corrected flux comparison
         ax1 = plt.subplot(4, 3, i*3 + 1)
@@ -2013,15 +2068,15 @@ def plot_appendix_figure(data_comparison, fig_path, scaling=None):
         corr_coef = np.corrcoef(data_comparison['Flux_Small_Corrected'][mask], 
                                data_comparison['Flux_Big_Corrected'][mask])[0, 1]
         r_squared = corr_coef**2
-        plt.text(0.05, 0.9, f'R² = {r_squared:.3f}', 
-                transform=ax1.transAxes, fontsize=9,
+        plt.text(0.05, 0.9, f'R² = {r_squared:.2f}', 
+                transform=ax1.transAxes, fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         
         # Column 2: Corrected flux ratio distribution
         ax2 = plt.subplot(4, 3, i*3 + 2)
         n, bins, patches = plt.hist(data_comparison['Corrected_Flux_Ratio'][mask], 
                                    bins=25, alpha=0.7, color=band_color, 
-                                   edgecolor='black', linewidth=0.5, range=(0,4))
+                                   edgecolor='black', linewidth=0.5, range=(0, 2.5))
         
         # Add vertical lines for key statistics
         median_ratio = np.median(data_comparison['Corrected_Flux_Ratio'][mask])
@@ -2037,38 +2092,42 @@ def plot_appendix_figure(data_comparison, fig_path, scaling=None):
         mean_ratio = np.mean(data_comparison['Corrected_Flux_Ratio'][mask])
         std_ratio = np.std(data_comparison['Corrected_Flux_Ratio'][mask])
         remark = '2 outliers > 4.0'
-        num = f'N = {len(data_comparison['Corrected_Flux_Ratio'][mask])}'
+        num = f"N = {len(data_comparison['Corrected_Flux_Ratio'][mask])}"
         
-        if i == len(bands) - 2:
-            stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}\n{remark}'
-        else:
-            stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
+        #if i == len(bands) - 2:
+        #    stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}\n{remark}'
+        #else:
+        stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
             
-        plt.text(0.95, 0.95, stats_text, transform=ax2.transAxes, fontsize=8,
-                verticalalignment='top', horizontalalignment='right')
+        #plt.text(0.95, 0.95, stats_text, transform=ax2.transAxes, fontsize=8,
+        #        verticalalignment='top', horizontalalignment='right')
                 #bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        plt.text(0.73, 0.7, stats_text, transform=ax2.transAxes, fontsize=10,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         
         # Column 3: Flux ratio vs brightness
         ax3 = plt.subplot(4, 3, i*3 + 3)
         scatter = plt.scatter(data_comparison['Flux_Small_Corrected'][mask], 
                             data_comparison['Corrected_Flux_Ratio'][mask], 
                             alpha=0.6, s=15, c=data_comparison['Apr_Corr_Small'][mask], 
-                            cmap='viridis', vmin=0.8, vmax=3.0)
+                            cmap='viridis', vmin=0.8, vmax=3.0, edgecolor='black')
         
-        plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, linewidth=1.5)
-        plt.axhline(median_ratio, color='darkred', linestyle='-', alpha=0.8, linewidth=1)
+        plt.axhline(1.0, color='red', linestyle='--', alpha=0.8, linewidth=1.5, label='Unity')
+        plt.axhline(median_ratio, color='darkred', linestyle='-', alpha=0.8, linewidth=1, label='Median')
         
         if scaling: plt.xscale('log')
         plt.xlabel('Small Aperture Flux [µJy]')
         plt.ylabel('Flux Ratio')
         plt.title(f'{band} Ratio vs Brightness', fontsize=11)
         plt.grid(True, alpha=0.3)
-        plt.ylim(0, 4)
+        plt.legend()
+        plt.ylim(0, 2.5)
         
         # Add colorbar only for the last band to save space
         if i == len(bands) - 1:
             cbar = plt.colorbar(scatter, ax=ax3, shrink=0.8)
-            cbar.set_label('Aperture Correction', fontsize=9)
+            cbar.set_label('Aperture Correction Factor (Large)', fontsize=10)
 
     # Overall title and layout adjustment
     #plt.suptitle('Aperture Photometry Summary: Small vs Large Aperture Comparison', 
@@ -2300,3 +2359,68 @@ def stack_cutouts(fits_paths, hdu_index=1, method='median'):
     if method == 'median':
         return np.nanmedian(arr, axis=0)
     return np.nanmean(arr, axis=0)
+
+def show_apertures(objid, band):
+    
+    vis_data = load_vis(f'/Users/benjamincollins/University/master/Red_Cardinal/photometry/vis_data/{objid}_{band}.h5')
+    output_file= os.path.join(f'/Users/benjamincollins/University/master/Red_Cardinal/photometry/apertures/aperture_comparisons/{objid}_{band}.png')
+
+    # Extract data from the dictionary
+    image_data = vis_data['original_data']
+    background_plane = vis_data['background_plane']
+    background_subtracted = vis_data['background_subtracted']
+    segm_mask = vis_data['segmentation_mask']
+    mask_vis = vis_data['mask_vis']
+    aperture_params = vis_data['aperture_params']
+    sigma = vis_data['sigma']
+    region_name = vis_data['region_name']
+    galaxy_id = vis_data['galaxy_id']
+    filter = vis_data['filter']
+
+    # Create aperture objects for plotting
+    x_center = aperture_params['x_center']
+    y_center = aperture_params['y_center']
+    a = aperture_params['a']
+    b = aperture_params['b']
+    theta = aperture_params['theta']
+
+    big_aperture = EllipticalAperture(
+        positions=(x_center, y_center),
+        a=a,
+        b=b,
+        theta=theta
+    )
+
+    small_aperture = EllipticalAperture(
+        positions=(x_center, y_center),
+        a=a/2,
+        b=b/2,
+        theta=theta
+    )
+
+    # Create figure with three subplots in a horizontal row
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+    # Background-subtracted data
+    vmin = np.nanpercentile(background_subtracted, 5)
+    vmax = np.nanpercentile(background_subtracted, 95)
+
+    im1 = axes[0].imshow(background_subtracted, origin='lower', cmap='magma', vmin=vmin, vmax=vmax)
+    plt.colorbar(im1, ax=axes[0], label='Flux [MJy/(sr pixel)]')
+    small_aperture.plot(ax=axes[0], color='black', lw=3, label='Small Aperture')
+    axes[0].legend(loc='upper right', fontsize=10)
+    #axes[0].set_title(f'Galaxy ID {galaxy_id} - {filter}')
+
+    im2 = axes[1].imshow(background_subtracted, origin='lower', cmap='magma', vmin=vmin, vmax=vmax)
+    plt.colorbar(im2, ax=axes[1], label='Flux [MJy/(sr pixel)]')
+    big_aperture.plot(ax=axes[1], color='blue', lw=3, label='Large Aperture')
+    axes[1].legend(loc='upper right', fontsize=10)
+    #axes[1].set_title(f'Galaxy ID {galaxy_id} - {filter}')
+        
+    # Tight layout and saving the figure‚
+    plt.tight_layout()
+    #plt.suptitle(f'Galaxy ID {galaxy_id} - {filter}', fontsize=14)
+    plt.subplots_adjust(top=0.85)  # Adjust to prevent overlap with annotation
+    plt.savefig(output_file, dpi=150)
+    plt.show()
+    plt.close(fig)

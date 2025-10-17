@@ -1,31 +1,17 @@
-import os
-import random
-import glob
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
 import astropy.units as u
 import astropy.constants as const
 from sedpy.observate import load_filters, list_available_filters
-import fsps
 
-import traceback
-import pickle as pkl
-from concurrent.futures import ProcessPoolExecutor
-import h5py
-
-from astropy.table import Table
 import prospect.io.read_results as reader
-from prospect.sources import FastStepBasis
 from prospect.models import priors
 from prospect.models.templates import TemplateLibrary
 from prospect.models import transforms
 from astropy.cosmology import WMAP9 as cosmo
 from prospect.models.sedmodel import PolySpecModel, SpecModel
 from prospect.utils.obsutils import fix_obs
-from prospect.utils.plotting import posterior_samples
-
-from collections import defaultdict
 
 from scipy.signal import medfilt
 from scipy import interpolate
@@ -138,8 +124,10 @@ def build_obs(objid):
     fluxes_all = np.concatenate([fluxes, np.full(len(filter_dict_miri), np.nan)])
     fluxes_err_all = np.concatenate([fluxes_err, np.full(len(filter_dict_miri), np.nan)])
     
-    for mfilt, flux, err in zip(miri_filters_present, miri_flux_array, miri_flux_err_array):
-        if mfilt in filter_dict_miri:
+    miri_filters_available = list(filter_dict_miri.keys())
+    
+    for mfilt, flux, err in zip(miri_filters_available, miri_flux_array, miri_flux_err_array):
+        if mfilt in miri_filters_present:
             idx = filter_code_all.index(mfilt)
             fluxes_all[idx] = flux
             fluxes_err_all[idx] = err
@@ -163,7 +151,7 @@ def build_obs(objid):
                         (obs['maggies'] > 0) & (obs['maggies_unc'] > 0)
 
     valid_all = np.isfinite(obs['maggies_all']) & np.isfinite(obs['maggies_unc_all']) & \
-                        (obs['maggies_all'] > 0) & (obs['maggies_unc_all'] > 0)
+                        (obs['maggies_unc_all'] > 0) # & (obs['maggies_all'] > 0) allow for negative fluxes
     
     obs['valid_mask'] = valid
     obs['valid_mask_all'] = valid_all
@@ -174,10 +162,15 @@ def build_obs(objid):
     obs['phot_wave']   = np.array([f.wave_effective for f, m in zip(obs['filters'], valid) if m])
     obs['filters']     = [f for f, m in zip(obs['filters'], valid) if m]
 
+    for filt, mag in zip(obs['filters_all'], obs['maggies_all']):
+        print(filt, mag)
+    
     obs['maggies_all']     = obs['maggies_all'][valid_all]
     obs['maggies_unc_all'] = obs['maggies_unc_all'][valid_all]
     obs['phot_wave_all']   = np.array([f.wave_effective for f, m in zip(obs['filters_all'], valid_all) if m])
     obs['filters_all']     = [f for f, m in zip(obs['filters_all'], valid_all) if m]
+    
+    if len(obs['filters']) == len(obs['filters_all']): print("⚠️ Attention: No valid Miri data found!")
     
     # ensure all required keys are present in the obs dictionary
     obs = fix_obs(obs)
@@ -306,7 +299,7 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     # ----------------------------
     # A non-parametric SFH model of mass in fixed time bins with a smoothness prior
     
-    tuniv = cosmo.age(zred).value
+    tuniv = cosmo.age(zred).value#*1e6
     #agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.95*tuniv*1000), 13), tuniv*1000 )
     agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
     agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))

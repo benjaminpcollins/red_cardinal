@@ -94,9 +94,9 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     
     model.params['polyorder'] = 10
 
-    #print("New model.ndim:", model.ndim)
-    #print("New model.theta_index:", model.theta_index)
-    #print("New model theta_labels:", [model.theta_labels()[i] for i in range(model.ndim)])
+    print("New model.ndim:", model.ndim)
+    print("New model.theta_index:", model.theta_index)
+    print("New model theta_labels:", [model.theta_labels()[i] for i in range(model.ndim)])
 
     # Map parameters from original fit to new model structure
     new_theta_labels = [model.theta_labels()[i] for i in range(model.ndim)]
@@ -455,6 +455,7 @@ def load_and_display(objid, duste=False, mod=None, mod_err=None, outfile=None):
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.tick_params(axis='both', which='major', labelsize=13)
+    ax.set_title(f"Galaxy {objid} at z={np.round(zred,2)}", fontsize=14)
     ax.legend()
     
     plt.tight_layout()
@@ -476,6 +477,7 @@ def create_hist(csv_path, out_dir, bins=25):
     
     print(f"Loaded {len(df)} rows from {csv_path}")
     
+    print(len(df['galaxy_id'].unique()))
     
     # Create output folder
     os.makedirs(out_dir, exist_ok=True)
@@ -501,18 +503,13 @@ def create_hist(csv_path, out_dir, bins=25):
     # Sort filter names by wavelength
     filters_sorted = sorted(filters,
                             key=lambda f: filter_wavelengths.get(f, np.inf))
-
-    unreliable = [12513, 18977]
-
+    
     # Make a 2x2 grid
     fig, axes = plt.subplots(2, 2, figsize=(10, 9), sharex=False, sharey=True)
     axes = axes.flatten()  # easier to index
 
     for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
         subset = df[df['filter_name'] == f]
-        
-        for un in unreliable:
-            subset = subset[subset['galaxy_id'] != un]
         
         ax.set_title(f'{bands[i]}')
         #ax.set_xlim(x_min, x_max)
@@ -567,7 +564,7 @@ def create_hist(csv_path, out_dir, bins=25):
     
     
     # Make a 2x2 grid
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=False)
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=True)
     axes = axes.flatten()  # easier to index
 
     for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
@@ -590,36 +587,36 @@ def create_hist(csv_path, out_dir, bins=25):
         
         ax.set_title(f'{bands[i]}')
         #ax.set_xlim(x_min, x_max)
-        ax.set_xlabel('Fractional difference')
+        ax.set_xlabel('Flux ratio (dex)')
         ax.set_ylabel('Number of galaxies')
         
         #if i in [0,1]: ax.set_ylim(0, 24)
         #elif i in [2,3]: ax.set_ylim(0,12)
 
-        frac_diffs = subset['perc_diff']
+        f_obs = subset['obs_flux']
+        f_model = subset['model_flux']
         
-        for val in frac_diffs:
-            if np.abs(val) > 5.0:
-                print(f"⚠️ Warning: Found extreme fractional difference {val:.2f} in filter {f} for galaxy ID {subset[subset['perc_diff'] == val]['galaxy_id'].values[0]}")
+        log_ratios = np.log10(f_obs / f_model)
         
         # Add compact statistics
-        mean_frac_diff = np.mean(frac_diffs)
-        std_frac_diff = np.std(frac_diffs)
+        mean_logr = np.mean(log_ratios)
+        std_logr = np.std(log_ratios)
+        median_logr = np.median(log_ratios)
         N = len(subset['galaxy_id'].unique())
         num = f'N = {N}'
         
-        x_min = -6
-        x_max = 2
+        x_min = -1.2
+        x_max = 1.2
         bins = np.linspace(x_min, x_max, 25)
         
-        ax.hist(frac_diffs, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
-
-        median_frac_diff = np.median(frac_diffs)
-        
-        stats_text = f'μ={mean_frac_diff:.2f}\nσ={std_frac_diff:.2f}\nMed={median_frac_diff:.2f}\n\n{num}'
-        ax.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+        ax.hist(log_ratios, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
+        stats_text = f'μ={mean_logr:.2f}\nσ={std_logr:.2f}\nMed={median_logr:.2f}\n\n{num}'
+        if i == 2: 
+            stats_text += ' (*)'
+            print(log_ratios[log_ratios > 1])
+        ax.text(0.025, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-        #ax.set_ylim(0, 24)
+        #ax.set_ylim(0, N//2+1)
         # Annotate in the top-right corner (adjust x,y if needed)
         #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
         #        transform=ax.transAxes, ha='right', va='top',
@@ -628,7 +625,7 @@ def create_hist(csv_path, out_dir, bins=25):
     #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     # Save single combined figure
-    filename = os.path.join(out_dir, 'frac_diffs_all_filters_v3.png')
+    filename = os.path.join(out_dir, 'log_ratios.png')
     plt.savefig(filename, dpi=300)
     plt.show()
     """
@@ -658,53 +655,59 @@ def create_hist(csv_path, out_dir, bins=25):
         print(f"✅ Saved histogram for galaxy {gal} to {filename}")
 
     """
+
     # Compute reduced chi^2 per galaxy
     reduced_chi2 = []
 
     for gal in df['galaxy_id'].unique():
         subset = df[df['galaxy_id'] == gal]
-        
-        for un in unreliable:
-            subset = subset[subset['galaxy_id'] != un]
-        
         n_filters = len(subset)
         if n_filters > 0:
             chi2 = np.sum(subset['N_sigma']**2) / n_filters           
             reduced_chi2.append({'galaxy_id': gal, 'reduced_chi2': chi2})
 
     chi2_df = pd.DataFrame(reduced_chi2)
+    
+    # Clip the highest 5% for visual clarity
+    chi2_clip = chi2_df['reduced_chi2'].quantile(0.95)
+    clipped = chi2_df[chi2_df['reduced_chi2'] <= chi2_clip]
+    excluded = len(chi2_df) - len(clipped)
 
-    # Plot histogram of reduced chi^2
-    plt.figure(figsize=(6,4))
-    plt.hist(chi2_df['reduced_chi2'], bins=25, color='salmon', alpha=0.7, edgecolor='black', range=(0, chi2_df['reduced_chi2'].quantile(0.95)))
-    plt.xlabel(r'Reduced $\chi^2$')
-    plt.ylabel('Number of galaxies')
-    #plt.title(r'Reduced $\chi^2$ distribution')
+    fig, axes = plt.subplots(1, 2, figsize=(9, 4), gridspec_kw={"width_ratios":[1.25,0.75]})
+    
+    # --- Left: Nsigma vs sSFR
+    counts, bins, patches = axes[0].hist(clipped['reduced_chi2'], bins=25, alpha=0.7, edgecolor='black', range=(0, chi2_clip))
+    
+    axes[0].set_xlabel(r'Reduced $\chi^2$')
+    axes[0].set_ylabel('Number of galaxies')
     
     # Count how many chi2 values are in the histogram
     chi2_values = len(chi2_df)
-    num = f'N = {chi2_values}'
+    num = f'\nN = {len(clipped)}/{chi2_values}\n(95th perctile)'
     # Annotate in the top-right corner (adjust x,y if needed)
     
     mean_chi2 = np.mean(chi2_df['reduced_chi2'])
     std_chi2 = np.std(chi2_df['reduced_chi2'])
     median_chi2 = np.median(chi2_df['reduced_chi2'])
     
-    stats_text = f'μ={mean_chi2:.2f}\nσ={std_chi2:.2f}\nMed={median_chi2:.2f}\n\n{num}'
+    #stats_text = f'{num}'
+    #axes[0].text(-0.335, 0.75, stats_text, transform=ax.transAxes, fontsize=10,
+    #        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
     
-    plt.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+    
+    #plt.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+    #            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
     
     # plot vertical lines for mean and median
-    plt.vlines(mean_chi2, ymin=0, ymax=20, color='red', alpha=0.8, linestyle='--', label='Mean')
-    plt.vlines(median_chi2, ymin=0, ymax=15, color='darkred', alpha=0.8, linestyle='--', label='Median')
-    plt.legend()
+    # Plot vertical lines for mean and median
+    ymax = counts.max() * 1.1
+    axes[0].vlines(mean_chi2, ymin=0, ymax=ymax, color='red', alpha=0.8, linestyle='--', linewidth=2, label=f'Mean: {mean_chi2:.2f}')
+    axes[0].vlines(median_chi2, ymin=0, ymax=ymax, color='darkred', alpha=0.8, linestyle='-', linewidth=2, label=f'Median: {median_chi2:.2f}')
+    axes[0].plot([],[], label=num, alpha=0)  # dummy plot for legend
+    axes[0].set_ylim(0, 20)
+    axes[0].legend()    
     
-    plt.tight_layout()
-    filename = os.path.join(out_dir, 'reduced_chi2.png')
-    plt.savefig(filename, dpi=300)
-    plt.show()
-    """
+    
     chi2_df['n_filters'] = chi2_df['galaxy_id'].apply(
     lambda g: len(df[df['galaxy_id'] == g])
     )
@@ -714,17 +717,35 @@ def create_hist(csv_path, out_dir, bins=25):
 
     # Filter out galaxies above this threshold
     filtered = chi2_df[chi2_df['reduced_chi2'] <= q95]
+    
+    print(len(chi2_df))
+    print(len(filtered))
 
     # Scatter plot with filtered data
-    plt.scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
-    plt.xlabel('Number of photometric data points')
-    plt.ylabel(r'Reduced $\chi^2$')
+    #plt.scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
+    axes[1].scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
+    axes[1].set_xlabel('Number of photometric data points')
+    axes[1].set_ylabel(r'Reduced $\chi^2$')
     #plt.title(r'Reduced $\chi^2$ vs. number of MIRI bands')
-    plt.axhline(1, color='red', linestyle='--')
-    filename = os.path.join(out_dir, 'reduced_chi2_vs_npoints_notitle.png')
+    axes[1].axhline(1, color='orange', linestyle='--', label='Unity')
+    axes[1].legend()    
+    
+    plt.tight_layout()
+    filename = os.path.join(out_dir, 'reduced_chi2.png')
     plt.savefig(filename, dpi=300)
+    print(f"✅ Saved reduced chi^2 plots to {filename}")
     plt.show()
-
+    
+    threshold = 30  # user-specified value
+    high_chi2_ids = chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'galaxy_id'].tolist()
+    print(f"{len(high_chi2_ids)} galaxies have reduced χ² > {threshold}")
+    print("These galaxies are:", high_chi2_ids)
+    print("Their χ² values are:", chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'reduced_chi2'].tolist())
+    
+    for id in high_chi2_ids:
+        load_and_display(id)
+    
+    """
     # Compute average fractional discrepancy per galaxy
     frac_disc = (
         df.groupby('galaxy_id')['perc_diff']
@@ -874,7 +895,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='
     # Now let's introduce the plot   
     
     if gradient == 'absolute':
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=(6, 4))
         cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
         bounds = np.arange(-0.5, 5.5, 1)
         norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
@@ -888,12 +909,12 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='
         
         # Colorbar
         cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
-        cbar.set_label('Number of MIRI detections')
+        cbar.set_label('Number of MIRI detections (absolute)')
         cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
         save_path += f'sfms_{gradient}'
         
     elif gradient == 'relative':  
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=(7, 4))
         cmap = plt.get_cmap(color_scheme)
         N_detected = []
         N_available = []
@@ -911,7 +932,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='
         cbar = plt.colorbar(sc, ax=ax)
         cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
         cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
-        cbar.set_label('Relative number of MIRI detections')
+        cbar.set_label('Number of MIRI detections (relative)')
         save_path += f'sfms_{gradient}'
     
     elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
@@ -947,7 +968,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='
         sc = ax.scatter(logM, logSFR_sample, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
         
         cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
+        cbar.set_label(rf'$\log_{{10}}(F) [µJy]$', fontsize=9)        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
         #ax.set_xlim(8, 13)
         ax.set_ylim(-1, 4)
         save_path += f'sfms_{gradient}'
@@ -977,7 +998,6 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='
         
         # Create scatter plot coloured by log flux
         sc = ax.scatter(logM, logSFR_sample, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7, edgecolor='black')
-        
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(rf'$N_\sigma$ ({band})')
         ax.set_ylim(-1, 4)
@@ -989,9 +1009,10 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='
 
     if ms_type == 'Leja':
         # MS line
-        ax.plot(logM_grid, logSFR_MS, 'k--', color='blue', alpha=0.7, label=f'Leja+22 MS (z={zred_ms:.2f})', linewidth=2)
-        ax.plot(logM_grid, logSFR_MS - 1.0, 'k:', color='blue', alpha=0.7, label='1 dex below MS')
+        ax.plot(logM_grid, logSFR_MS, 'k--', color='black', alpha=0.7, label=f'Leja+22 MS (z={zred_ms:.2f})', linewidth=2)
+        ax.plot(logM_grid, logSFR_MS - 1.0, 'k:', alpha=0.7, label='1 dex below MS')
         save_path += f'_Leja.png'
+        #ax.plot(10.720281148198858, 0.5723139475044815, color='red', alpha=0.2)
     elif ms_type == 'Speagle':
         # MS line and shaded 1-sigma region
         ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
@@ -1001,7 +1022,7 @@ def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='
     # Labels and legend
     ax.set_xlabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
     ax.set_ylabel(r'$\log_{10}(\mathrm{SFR} / $M$_\odot\,\mathrm{yr}^{-1})$', fontsize=14)
-    ax.legend(loc='lower right')
+    ax.legend()
     ax.grid(alpha=0.3)
 
     plt.tight_layout()
@@ -1030,7 +1051,7 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
     """
     
     if gradient == 'absolute':
-        fig, ax = plt.subplots(figsize=(10, 5))
+        fig, ax = plt.subplots(figsize=(6, 4))
         cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
         bounds = np.arange(-0.5, 5.5, 1)
         norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
@@ -1041,19 +1062,22 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         sc = plt.scatter(zreds, logmasses, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8, edgecolor='black')
         
         cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
-        cbar.set_label('Number of MIRI detections')
+        cbar.set_label('Number of MIRI detections (absolute)')
         cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
         
-        detected = N_detected > 0
-        # Add sample statistics as text
-        ax.text(0.78, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        print("Detected galaxies: ", np.sum(N_detected > 0), " out of ", len(zreds))
         
-        save_path = save_path + f'zM_{gradient}.png'
+        detected = N_detected > 0
+        print("Detected galaxies: ", np.sum(detected), " out of ", len(zreds))
+        # Add sample statistics as text
+        #ax.text(0.61, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
+        #        transform=ax.transAxes, verticalalignment='top',
+        #        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        save_path = save_path + f'zM_{gradient}_v2.png'
         
     elif gradient == 'relative': 
-        fig, ax = plt.subplots(figsize=(10, 5)) 
+        fig, ax = plt.subplots(figsize=(6, 4)) 
         N_detected = []
         N_available = []
         for det in detections: 
@@ -1063,6 +1087,8 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         N_available = np.array(N_available)
         f_det = N_detected / N_available  # fraction 0-1  
         
+        print("Detected galaxies: ", np.sum(N_detected > 0), " out of ", len(zreds))
+        
         cmap = plt.get_cmap(color_scheme)
 
         sc = ax.scatter(zreds, logmasses, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
@@ -1070,15 +1096,15 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         cbar = plt.colorbar(sc, ax=ax)
         cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
         cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
-        cbar.set_label('Relative number of MIRI detections')
+        cbar.set_label('Number of MIRI detections (relative)')
         
         detected = N_detected > 0
         # Add sample statistics as text
-        ax.text(0.78, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        #ax.text(0.6, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
+        #        transform=ax.transAxes, verticalalignment='top',
+        #        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
-        save_path = save_path + f'zM_{gradient}.png'
+        save_path = save_path + f'zM_{gradient}_v2.png'
         
     elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -1093,11 +1119,12 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
             else:
                 flux_array.append(np.nan)
                 mask.append(False)
-        
+                
         mask = np.array(mask)
         
         # Apply mask to all quantities
         flux_array = np.array(flux_array)[mask]*1e6
+        print(flux_array)
         zreds = np.array(zreds)[mask]
         logmasses = np.array(logmasses)[mask]
 
@@ -1109,14 +1136,29 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         elif gradient == 'f1800w': color_scheme = "Oranges"
         elif gradient == 'f2100w': color_scheme = "Reds"
 
+        print("Non-finite zreds:", np.sum(~np.isfinite(zreds)))
+        print("Non-finite logmasses:", np.sum(~np.isfinite(logmasses)))
+        print("Non-finite log_flux_array:", np.sum(~np.isfinite(log_flux_array)))
+
+        invalid = ~np.isfinite(zreds) | ~np.isfinite(logmasses) | ~np.isfinite(log_flux_array)
+        print("Indices of invalid points:", np.where(invalid)[0])
+        print("Example invalid entries:")
+        print("zreds:", zreds[invalid])
+        print("log_flux_array:", log_flux_array[invalid])
+
         # Create scatter plot coloured by log flux
         sc = ax.scatter(zreds, logmasses, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
-        
         cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
+        cbar.set_label(rf'$\log_{{10}}(F) [µJy]$', fontsize=12)        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
+        
+        stats_text = f'N = {len(zreds)}'
+        ax.text(0.82, 0.9, stats_text, transform=ax.transAxes, fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
         save_path = save_path + f'zM_{gradient}.png'
-        ax.set_xlim(1.5, 3.75)
-        ax.set_ylim(9, 12)
+        ax.set_title(f'{band}', fontsize=14)
+        #ax.set_xlim(1.5, 3.75)
+        #ax.set_ylim(9, 12)
     
     elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
         fig, ax = plt.subplots(figsize=(6, 4))
@@ -1124,8 +1166,8 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         mask = []
         band = gradient.split('_')[1].upper()
         
-        for det_dict, nsig_dict in zip(detections, data):
-            if det_dict.get(band, False) and band in nsig_dict:
+        for nsig_dict in data:
+            if band in nsig_dict:
                 nsig_array.append(nsig_dict[band])
                 mask.append(True)
             else:
@@ -1133,7 +1175,7 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
                 mask.append(False)
         
         mask = np.array(mask)
-
+        
         # Apply mask to all quantities
         nsig_array = np.array(nsig_array)[mask]
         zreds = np.array(zreds)[mask]
@@ -1141,12 +1183,14 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
         
         # Create scatter plot coloured by log flux
         sc = ax.scatter(zreds, logmasses, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7, edgecolor='black')
-        
+        stats_text = f'N = {len(zreds)}'
+        ax.text(0.82, 0.9, stats_text, transform=ax.transAxes, fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         cbar = fig.colorbar(sc, ax=ax)
         cbar.set_label(rf'$N_\sigma$ ({band})')
         save_path = save_path + f'zM_{gradient}_r.png'
         ax.set_xlim(1.5, 3.75)
-        ax.set_ylim(9, 12)
+        ax.set_ylim(8.75, 12)
         
     
     else:
@@ -1165,26 +1209,52 @@ def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme=
     print(f"Plot saved as {save_path}")
 
 
-def plot_nsigma_vs_params(nsig, band, log_ssfr, dust, save_path=None):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+def plot_nsigma_vs_params(nsig1, nsig2, log_ssfr, dust, save_path=None):
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     
+    axes = axes.flatten()
     # --- Left: Nsigma vs sSFR
-    sc1 = axes[0].scatter(log_ssfr, nsig, c=dust, cmap="viridis", alpha=0.7, edgecolor='black')
+    sc1 = axes[0].scatter(log_ssfr, nsig1, c=dust, cmap="viridis", alpha=0.7, edgecolor='black')
     axes[0].axhline(0, ls="--", c="grey")
     axes[0].set_xlabel(r'$\log(\mathrm{sSFR}_{100}\,[\mathrm{yr}^{-1}])$')
     axes[0].set_ylabel(r'$N_\sigma$')
-    axes[0].set_title(f'{band}: ' + r'$\mathrm{N_\sigma}$ vs sSFR')
+    axes[0].set_title(f'F1800W: ' + r'$\mathrm{N_\sigma}$ vs sSFR')
+    axes[0].set_xlim(-9.75, -7.75)
     cb1 = fig.colorbar(sc1, ax=axes[0])
     cb1.set_label("Dust attenuation (dust2)")
     
     # --- Right: Nsigma vs Dust
-    sc2 = axes[1].scatter(dust, nsig, c=log_ssfr, cmap="plasma", alpha=0.7, edgecolor='black')
+    sc2 = axes[1].scatter(dust, nsig1, c=log_ssfr, cmap="plasma", alpha=0.7, edgecolor='black')
     axes[1].axhline(0, ls="--", c="grey")
-    axes[1].set_xlabel(r'Dust attenuation ($\mathrm{dust2}$)')
+    axes[1].set_xlabel(r'Dust attenuation $A_V$')
     axes[1].set_ylabel(r'$N_\sigma$')
-    axes[1].set_title(f'{band}: ' + r'$\mathrm{N_\sigma}$ vs $\mathrm{A_V}$')
+    axes[1].set_title(f'F1800W: ' + r'$\mathrm{N_\sigma}$ vs $\mathrm{A_V}$')
+    axes[1].set_xlim(-0.1, 3)
     cb2 = fig.colorbar(sc2, ax=axes[1])
     cb2.set_label(r'$\log(\mathrm{sSFR}_{100})$')
+    
+    # --- Left: Nsigma vs sSFR
+    sc3 = axes[2].scatter(log_ssfr, nsig2, c=dust, cmap="viridis", alpha=0.7, edgecolor='black')
+    axes[2].axhline(0, ls="--", c="grey")
+    axes[2].set_xlabel(r'$\log(\mathrm{sSFR}_{100}\,[\mathrm{yr}^{-1}])$')
+    axes[2].set_ylabel(r'$N_\sigma$')
+    axes[2].set_title(f'F2100W: ' + r'$\mathrm{N_\sigma}$ vs sSFR')
+    axes[2].set_xlim(-9.75, -7.75)
+    cb1 = fig.colorbar(sc1, ax=axes[2])
+    cb1.set_label("Dust attenuation (dust2)")
+    
+    # --- Right: Nsigma vs Dust
+    sc4 = axes[3].scatter(dust, nsig2, c=log_ssfr, cmap="plasma", alpha=0.7, edgecolor='black')
+    axes[3].axhline(0, ls="--", c="grey")
+    axes[3].set_xlabel(r'Dust attenuation $A_V$')
+    axes[3].set_ylabel(r'$N_\sigma$')
+    axes[3].set_title(f'F2100W: ' + r'$\mathrm{N_\sigma}$ vs $\mathrm{A_V}$')
+    axes[3].set_xlim(-0.1, 3)
+    cb2 = fig.colorbar(sc2, ax=axes[3])
+    cb2.set_label(r'$\log(\mathrm{sSFR}_{100})$')
+    
+    for ax in axes:
+        ax.set_ylim(-6,6)
     
     plt.tight_layout()
     if save_path:
@@ -1213,6 +1283,7 @@ def plot_extremes(objid, base_paths, add_fit=False, save_path=None):
     nircam_path = os.path.join(base_paths["nircam"], f"{objid}_F444W_cutout.fits")
     miri_paths = {
         band: os.path.join(base_paths["miri"], f"{objid}_{band}.h5")
+        #for band in ["F770W", "F1000W", "F1800W", "F2100W"]
         for band in ["F1800W", "F2100W"]
     }
     

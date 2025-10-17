@@ -430,7 +430,7 @@ def create_rgb_plot(imagesRGB, params, stretch, outfile):
         
         for ax, colour in zip(axes, ['B', 'R']):
             ax.imshow(norm_images[colour], cmap='gray', origin='lower')
-            ax.set_title(channel_labels[colour], fontsize=12)
+            #ax.set_title(channel_labels[colour], fontsize=12)
             ax.axis('off')
     else: # R, G and B available
         # Create a horizontal panel with 3 grayscale subplots
@@ -446,7 +446,7 @@ def create_rgb_plot(imagesRGB, params, stretch, outfile):
         
         for ax, colour in zip(axes, ['B', 'G', 'R']):
             ax.imshow(norm_images[colour], cmap='gray', origin='lower')
-            ax.set_title(channel_labels[colour], fontsize=12)
+            #ax.set_title(channel_labels[colour], fontsize=12)
             ax.axis('off')
     
     plt.tight_layout()

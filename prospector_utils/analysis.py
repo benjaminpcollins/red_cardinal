@@ -308,19 +308,13 @@ def get_galaxy_properties(gid, phot_miri, non_detections=None):
     print(f"Galaxy {gid} fluxes (valid only): {flux}")
     print(f"Galaxy {gid} detections (all bands): {detections}")
 
+    for band in all_bands:
+        if band not in filters_available:
+            # Remove keys for bands not observed
+            detections.pop(band, None)
 
     filters = ph_miri['Filters'][0].split(',') # e.g. ['F770W', 'F1800W']
     
-    print(filters)
-    
-    # Dictionary to track which bands are valid 
-    detected = {band: True for band in filters} 
-    
-    for band in filters: 
-        # If this galaxy is marked as a non-detection in that band 
-        if non_detections is not None and gid in non_detections.get(band, []): 
-            detected[band] = False
-            
     # ============================
     # Part related to the fit quality
     # ============================
@@ -351,10 +345,10 @@ def get_galaxy_properties(gid, phot_miri, non_detections=None):
         "sfr_last100": sfr_last100,       # averaged over last 100 Myr
         "fluxes": flux,
         "errors": err,
-        "detections": detected,
-        "nsig": dict(zip(filters, nsig)),
+        "detections": detections,
+        "nsig": dict(zip(filters_available, nsig)),
         "chi2_red": chi2_red,
-        "frac_diff": dict(zip(filters, perc_diff))
+        "frac_diff": dict(zip(filters_available, perc_diff))
     }
     
     return galaxy_data
