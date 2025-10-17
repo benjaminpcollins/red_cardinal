@@ -37,7 +37,7 @@ def get_zred(objid):
     Returns:
     float: The absolute value of the redshift corresponding to the given object ID.
     """
-    dat_zred = np.loadtxt('/home/bpc/University/master/Red_Cardinal/catalogues/redshifts.txt', dtype=[('galid', int),('zred', '<f8')])
+    dat_zred = np.loadtxt('/Users/letiziabugiani/Desktop/bluejay/spectroscopy/redshifts_v0.1.txt', dtype=[('galid', int),('zred', '<f8')])
     return abs(dat_zred['zred'][dat_zred['galid'] == objid][0])
 
 def get_MAP(results,verbose=False):
@@ -142,7 +142,7 @@ def process_galaxy(output):
                     add_agn=results['run_params']['add_agn'],
                     fit_afe=results['run_params']['fit_afe'])
     
-    model.params['polyorder'] = 25
+    model.params['polyorder'] = 10
     # now we have to exclude the last 3 parameters from the fit
     map_parameters = get_MAP(results)
     map_parameters = map_parameters[:-3]
