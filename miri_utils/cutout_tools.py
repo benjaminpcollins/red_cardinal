@@ -5,8 +5,8 @@ MIRI Utils Astronomical Image Cutout Generator
 ==============================================
 
 This script creates cutout images from astronomical FITS files based on catalogue coordinates.
-It extracts regions of interest around specified celestial coordinates and preserves all
-data extensions in the original FITS files. The script also generates preview PNG images
+It extracts regions of interest around the specified celestial coordinates and preserves all
+data extensions of the original FITS files. The script also generates preview PNG images
 for quick visual inspection of the cutouts.
 
 Dependencies:
@@ -15,8 +15,8 @@ Dependencies:
     - numpy: For array operations and numerical calculations
 
 Author: Benjamin P. Collins
-Date: May 15, 2025
-Version: 2.0
+Date: Nov 21, 2025
+Version: 3.0
 """
 
 import astropy.units as u
@@ -99,7 +99,7 @@ def resample_cutout(indir, num_pixels):
             fits.writeto(out_path, resampled_data, header, overwrite=True)
             print(f"Saved resampled file to: {out_path}")
 
-def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", nan_thresh=0.4, suffix=''):
+def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, nan_thresh=0.4, suffix='', preview=False):
     """
     Produces cutout images from astronomical FITS files centred on catalogue positions.
     
@@ -128,15 +128,15 @@ def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", na
     filter : str
         Filter name to select FITS files (e.g., 'F770W'). Will be used in filename matching.
     
-    obs : str, optional
-        Additional identifier for observation, used in output filenames.
-    
     nan_thresh : float, optional
         Maximum allowed fraction of NaN values in a cutout (default: 0.4).
         Cutouts with more NaNs than this threshold will be discarded.
     
     suffix : str, optional
         Additional string to append to output filenames.
+    
+    preview: bool, optional
+        If True, generates PNG preview images for each cutout. Defaults to False.
     
     Returns
     -------
@@ -149,6 +149,17 @@ def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", na
     cutout size in pixels. Adjust this value if using data from different instruments.
     """
 
+    # Extract survey name and observation number from the survey parameter
+    if '1' in survey:
+        survey_name = survey[:-1]
+        obs = '1'
+    elif '2' in survey:
+        survey_name = survey[:-1]
+        obs = '2'
+    else:
+        survey_name = survey
+        obs = ''
+    
     # Load target catalogue with object IDs and coordinates
     with fits.open(cat) as catalog_hdul:
         cat_data = catalog_hdul[1].data
@@ -159,7 +170,7 @@ def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", na
     # Find all FITS files matching the requested filter
     filter_l = filter.lower()
     fits_files = glob.glob(os.path.join(indir, f"*{filter_l}*.fits"))
-    print(f"Found {len(fits_files)} FITS files from the {survey} survey with filter {filter}.")
+    print(f"Found {len(fits_files)} FITS files from the {survey_name} survey with filter {filter}.")
     print("Processing:")
     for f in fits_files:
         print(f"{f}")
@@ -241,23 +252,80 @@ def produce_cutouts(cat, indir, output_dir, survey, x_arcsec, filter, obs="", na
                 
                 # Save the cutout if it meets quality criteria (not too many NaNs and has data extensions)
                 if max_nan_ratio < nan_thresh and len(cutout_hdul) > 1:
+                    
                     # Generate PNG preview from extension 1 data
                     preview_data = cutout_hdul[1].data
-                    plt.figure(figsize=(6, 6))
-                    plt.imshow(preview_data, origin="lower", cmap="gray")
                     
+                    # Calculate angle of rotation for NE cross
+                    angle = calculate_angle(fits_file)  
+                    
+                    plt.figure(figsize=(6, 6))                   
+                    plt.imshow(preview_data, origin="lower", cmap="gray")
                     plt.title(filter)
-                    png_filename = os.path.join(output_dir, f"{ids[i]}_{filter}_cutout_{survey}{obs}{suffix}.png")
+                    
+                    # Draw North/East compass
+                    ax = plt.gca()
+                    draw_NE_cross(ax, angle_deg=angle, size=50, offset=20)
+                    
+                    png_filename = os.path.join(output_dir, f"{ids[i]}_{filter}_cutout_{survey_name}{obs}{suffix}.png")
                     plt.savefig(png_filename)
                     plt.close()
 
                     # Save multi-extension FITS cutout
-                    fits_filename = os.path.join(output_dir, f"{ids[i]}_{filter}_cutout_{survey}{obs}{suffix}.fits")
+                    fits_filename = os.path.join(output_dir, f"{ids[i]}_{filter}_cutout_{survey_name}{obs}{suffix}.fits")
                     cutout_hdul.writeto(fits_filename, overwrite=True)
                     counts += 1
 
     # Report completion statistics
     print(f"Produced cutouts for {counts} of {total} galaxies in the catalogue.")
+
+
+def draw_NE_cross(ax, angle_deg, size=40, offset=10, colour="white", lw=2):
+    """
+    Draw a North-East direction cross in the top-right corner of an image.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axis on which to draw.
+    angle_deg : float
+        Rotation of the image relative to North (in degrees).
+    size : float
+        Length of the N/E arrows (pixels).
+    offset : float
+        Distance from the border (pixels).
+    colour : str
+        Colour of the lines/text.
+    lw : float
+        Line width.
+    """
+
+    angle = np.deg2rad(angle_deg)
+    east_angle = angle + np.pi/2
+
+    # Get image dimensions from axis limits
+    x_max = ax.get_xlim()[1]
+    y_max = ax.get_ylim()[1]
+
+    # Origin of the compass (top-right corner, moved inward by offset)
+    x0 = x_max - offset
+    y0 = y_max - offset
+
+    # North arrow endpoint
+    xN = x0 + size * np.sin(angle)     # sin(angle) because image coords increase upward
+    yN = y0 + size * np.cos(angle)
+
+    # East arrow endpoint (90° CCW)
+    xE = x0 + size * np.sin(east_angle)
+    yE = y0 + size * np.cos(east_angle)
+
+    # Draw arrows
+    ax.plot([x0, xN], [y0, yN], colour, lw=lw)
+    ax.plot([x0, xE], [y0, yE], colour, lw=lw)
+
+    # Labels
+    ax.text(xN, yN, "N", color=colour, fontsize=12, ha="center", va="center")
+    ax.text(xE, yE, "E", color=colour, fontsize=12, ha="center", va="center")
 
 
 def calculate_angle(fits_file):
