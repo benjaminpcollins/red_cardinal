@@ -1405,3 +1405,4 @@ def show_png(path, ax, title):
     ax.imshow(img)
     #ax.set_title(title)
     ax.axis("off")
+    
