@@ -62,6 +62,8 @@ from matplotlib.patches import Circle
 # Suppress common WCS-related warnings that don't affect functionality
 warnings.simplefilter("ignore", category=FITSFixedWarning)
 
+
+
 def compute_centroid(cutout, smooth_sigma, good_frac_cutout, smooth_miri):
     """Compute the centroid of a given cutout image using quadratic fitting.
     
