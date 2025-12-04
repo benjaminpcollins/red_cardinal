@@ -155,7 +155,7 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder=N
             angle=theta,                               # original values
             edgecolor='red',
             facecolor='none',
-            linestyle='--',
+            #linestyle='--',
             lw=2,
             label='Original'
         )
@@ -182,7 +182,7 @@ def adjust_aperture(galaxy_id, filter, survey, obs, output_folder, mask_folder=N
         # Save figure
         mask_dir = os.path.join(output_folder, mask_folder)
         os.makedirs(mask_dir, exist_ok=True)
-        png_path = os.path.join(mask_dir, f'{galaxy_id}_{survey}{obs}_aperture_overlay.png')
+        png_path = os.path.join(mask_dir, f'{galaxy_id}_{survey}{obs}_{filter}_overlay.png')
         plt.savefig(png_path, dpi=150, bbox_inches='tight')
         plt.close(fig)
         
@@ -502,7 +502,7 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
         vmin, vmax = np.nanpercentile(data, percentile)
         im = ax.imshow(data, origin='lower', cmap=cmap, vmin=vmin, vmax=vmax)
         #aperture.plot(ax=ax, color='blue', lw=4)
-        ax.set_title(label)
+        ax.set_title(label, fontsize=10)
         return im
     
     if plane_sub_dir:
@@ -517,7 +517,7 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
             filter = vis['filter']
             galaxy_id = vis['galaxy_id']
 
-            if str(galaxy_id) == '12282':
+            if str(galaxy_id) in ['12282', '10128']:
                 
                 aperture = EllipticalAperture(
                     positions=(aperture_params['x_center'], aperture_params['y_center']),
@@ -527,16 +527,19 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
                 )
 
                 # Create figure with three subplots in a horizontal row
-                fig, axes = plt.subplots(1, 3, figsize=(12, 6))
+                fig, axes = plt.subplots(1, 3, figsize=(14, 4))
 
                 # Plot image1 (original data) on the first subplot
                 im0 = plot_aperture_overlay(axes[0], image_data, aperture)
+                axes[0].set_title("Original Data", fontsize=14)
 
                 # Plot image2 (background plane) on the second subplot
                 im1 = plot_aperture_overlay(axes[1], background_plane, aperture)
+                axes[1].set_title("Background Plane", fontsize=14)
                 
                 # Plot image3 (background-subtracted) on the third subplot
                 im2 = plot_aperture_overlay(axes[2], background_subtracted, aperture)
+                axes[2].set_title("Background-Subtracted Data", fontsize=14)
 
                 # Add a minus and equals sign between the images as an annotation
                 #fig.text(0.32, 0.45, '$-$', fontsize=30, ha='center', va='center', rotation=0, color='black')
@@ -557,12 +560,13 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
                 plt.tight_layout()
                 plt.subplots_adjust(top=0.85)  # Adjust to prevent overlap with annotation
                 #plt.suptitle(f'{filter} - Galaxy ID {galaxy_id}', fontsize=18)
-                plt.savefig(os.path.join(plane_sub_dir, f'{galaxy_id}_{filter}.png'), dpi=150)
+                plt.savefig(os.path.join(plane_sub_dir, f'{galaxy_id}_{filter}.png'), dpi=150, bbox_inches='tight')
                 plt.close(fig)
+                print(f"Saved plane subtraction figure for Galaxy {galaxy_id}, Filter {filter} in {plane_sub_dir}")
 
     if mosaic_dir:
         os.makedirs(mosaic_dir, exist_ok=True)
-        """
+    
         for gid in all_ids:
             print(f"Processing galaxy {gid}...")
             vis_files = glob.glob(os.path.join(input_dir, f'{gid}*.h5'))
@@ -602,7 +606,7 @@ def create_mosaics(input_dir, mosaic_dir=None, plane_sub_dir=None):
             plt.tight_layout()
             plt.savefig(os.path.join(mosaic_dir, f'{gid}.png'), dpi=150)
             plt.close(fig)            
-        """
+        
         
 
 
