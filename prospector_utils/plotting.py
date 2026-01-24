@@ -22,15 +22,12 @@ from matplotlib.image import imread
 
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
-dirout = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
-
-
-def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
+def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
     """Main function to reconstruct and plot PROSPECTOR results with MIRI data
     
     Parameters:
     -----------
-    objid : int
+    objid : str
         Galaxy ID of the object of interest
     plot_dir : str, optional
         Directory to store the plots in
@@ -43,8 +40,11 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
     
     print(f"Processing galaxy {objid} =============================")
     
+    # Be sure that objid is an integer
+    objid = int(objid)
+    
     # Load the h5 file for the given objid
-    h5_file = glob.glob(os.path.join(dirout, f"output_{objid}*.h5"))
+    h5_file = glob.glob(os.path.join(data_dir, f"output_{objid}*.h5"))
     
     try:
         h5_file = h5_file[0]
@@ -53,7 +53,7 @@ def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
         return None
 
     # Load PROSPECTOR results
-    full_path = os.path.join(dirout, h5_file)
+    full_path = os.path.join(data_dir, h5_file)
     results, loaded_obs, loaded_model = reader.results_from(full_path)
     
     # Build new observations including MIRI
