@@ -12,52 +12,19 @@ from .plotting import load_and_display
 from sedpy.observate import getSED
 from astropy import constants as const
 from astropy.io import fits
-import pyphot
 from astropy.cosmology import WMAP9 as cosmo
 from prospect.models.transforms import logsfr_ratios_to_sfrs
 
 
-def predict_phot():
-
-    lib = pyphot.get_library
-    print(lib)
-    
 def get_model_photometry(spec, wave_spec, filters, zred):
-    """
-    Generate a model photometry prediction on a prospector model spectrum using sedpy
+    # wave_spec is rest-frame, convert to observer-frame
+    wave_obs = wave_spec * (1 + zred)
     
-    Parameters:
-    -----------
-    spec : ndarray
-        The model spectrum in units of maggies (standard units for Prospector).
-    wave_spec : ndarray
-        The wavelength grid corresponding to the model spectrum in Angstroms.
-    filters : list of sedpy Filter objects
-        The list of filters for which to compute the photometry.
-    zred : float
-        The redshift of the object.
+    # Prospector 'spec' is in maggies (f_nu). 
+    # sedpy.getSED can work with this directly if you treat it as f_nu.
+    phot_maggies = getSED(wave_obs, spec, filterlist=filters)
     
-    Returns:
-    --------
-    phot_new : ndarray
-        The predicted photometry in the same units as the input spectrum.
-    """ 
-    
-    # 1) maggies -> f_nu [erg/s/cm^2/Hz]
-    fnu_cgs = spec * 3631e-23
-    
-    # 2) f_nu -> f_lambda_rest [erg/s/cm^2/Å]
-    wave_cm = wave_spec * 1e-8  # Convert Å to cm
-    flam_cgs = fnu_cgs * const.c.cgs.value / wave_cm**2 / 1e8  # /1e8 converts cm⁻¹ to Å⁻¹
-    
-    # 3) Move to observer frame
-    lam_obs_A = wave_spec * (1.0 + zred)  # in AA
-    flam_obs  = flam_cgs / (1.0 + zred)  # critical!
-    
-    # 4) Recreate photometry
-    phot_new = getSED(lam_obs_A, flam_obs, filterlist=filters, linear_flux=True)   
-    
-    return phot_new
+    return phot_maggies
 
 def compute_residuals(objid, show_plot=True):
     """Calculate the residuals between the Prospector model photometry and the observed photometry for a given object ID.
@@ -282,7 +249,7 @@ def get_galaxy_properties(gid, phot_miri, non_detections=None):
     flux_array = np.ma.filled(ph_miri['Flux'][0], fill_value=np.nan)
     err_array  = np.ma.filled(ph_miri['Flux_Err'][0], fill_value=np.nan)
 
-    print(f"Flux array: {flux_array}")
+    #print(f"Flux array: {flux_array}")
 
     # Initialize dictionaries
     flux = {}       # Only contains valid fluxes
@@ -305,8 +272,8 @@ def get_galaxy_properties(gid, phot_miri, non_detections=None):
             err[band]  = ferr
 
     # Example output
-    print(f"Galaxy {gid} fluxes (valid only): {flux}")
-    print(f"Galaxy {gid} detections (all bands): {detections}")
+    #print(f"Galaxy {gid} fluxes (valid only): {flux}")
+    #print(f"Galaxy {gid} detections (all bands): {detections}")
 
     for band in all_bands:
         if band not in filters_available:
