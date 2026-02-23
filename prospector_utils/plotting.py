@@ -6,14 +6,14 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import Normalize, ListedColormap
 import pickle as pkl
-from datetime import datetime
 from scipy.stats import norm
 import prospect.io.read_results as reader
 from prospect.sources import FastStepBasis
 from prospect.utils.plotting import posterior_samples
-from .params import build_obs, build_model, get_MAP, mask_obs
+from .params import get_MAP, update_obs_with_miri
 from astropy.cosmology import Planck18 as cosmo
 from astropy import units as u
+from .params import get_model_photometry
 
 from astropy.io import fits
 from astropy.visualization import ZScaleInterval, ImageNormalize, AsinhStretch
@@ -55,83 +55,38 @@ def reconstruct(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
 
     # Load PROSPECTOR results
     full_path = os.path.join(data_dir, h5_file)
-    results, loaded_obs, loaded_model = reader.results_from(full_path)
-    
-    
-    # Build new observations including MIRI
-    obs = build_obs(objid, phot_table)
+    results, obs, model = reader.results_from(full_path)
     
     # Now we have to exclude the last 3 parameters from the fit
     map_parameters = get_MAP(results)
     
-    original_theta_labels = results['theta_labels']
-    original_map_parameters = map_parameters.copy()  # Keep original for reference
-    
-    # Build the MAP dictionary
-    MAP = {}
-    for a,b in zip(results['theta_labels'], map_parameters):
-        MAP[a] = b
-    
-    # Section to decide whether to include dust emission or not
-    #map_parameters = map_parameters[:-3]
-    add_duste = results['run_params']['add_duste']
-    add_agn = results['run_params']['add_agn']  # Maybe check if this is True?
-        
     # Get accurate redshifts from the MAP (obtained by MJ)    
     zred = map_parameters[0]
-
-    #loaded_obs['mask'] = mask_obs(loaded_obs, zred)
     
-    # Build model matching original setup    
-    # Somehow this works if zred=objid and waverange=zred, but not if I pass the arguments correctly
-    model = build_model(zred=zred,
-                        waverange=None,
-                        add_duste=add_duste,
-                        add_neb=False,  # Set add_neb to False
-                        add_agn=add_agn,
-                        fit_afe=results['run_params']['fit_afe']
-                        )
-    
-    #print(f"Model expects {model.ndim} parameters.")
-    #print(f"Model free parameters: {model.theta_labels}")
-    #print(f"Your MAP vector length: {len(map_parameters)}")
-    
-    #model.params['polyorder'] = 10
-
-    
-    #for a,b in zip(results['theta_labels'], map_parameters):
-    #    print(a, b)
-    
-    #print("Adjusted length of map_parameters: ", len(map_parameters), "\n")
-
     # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
     sps = FastStepBasis(zcontinuous=1)
 
     # Obtain best fit model spectrum and model photometry    
-    spec, phot, _ = loaded_model.predict(map_parameters, obs=loaded_obs, sps=sps)
+    spec, model_phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
     
-    maggies_to_muJy = 3631e6 # maggies to µJy conversion factor
+    # Convert maggies to µJy
+    maggies_to_muJy = 3631e6
     
-    # wavelengths of the model spectrum
+    # Wavelengths of the model spectrum
     wave_spec = sps.wavelengths
     wave_spec_rs = sps.wavelengths * 1e-4 * (1 + zred)   # convert to µm, redshifted    
     
     # Convert to arrays
-    phot = np.array(phot)
+    model_phot = np.array(model_phot)
     maggies = np.array(obs['maggies'])
     maggies_unc = np.array(obs['maggies_unc'])
-
-    # Initialise the plot
-    fig, ax = plt.subplots(figsize=(8, 5))
     
-    #########   PLOT POSTERIOR SAMPLES     #########
-    
-    nsample = 100
-    samples = posterior_samples(results, nsample)
+    # Draw 100 posterior samples
+    samples = posterior_samples(results, 100)
     
     all_specs = []
     for params_i in samples:
-        spec_i, _, _ = loaded_model.predict(params_i, obs=loaded_obs, sps=sps)
+        spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
         all_specs.append(spec_i)
         
     all_specs = np.array(all_specs)  # shape: (nsample, nwave)
@@ -145,6 +100,19 @@ def reconstruct(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
     lower_scaled = lower * maggies_to_muJy    
     median_scaled = median * maggies_to_muJy
     upper_scaled = upper * maggies_to_muJy
+    
+    # Extend the obs dictionary with MIRI photometry for plotting
+    obs_miri = update_obs_with_miri(objid, obs, phot_table)
+    miri_filters = obs_miri['filters_miri']
+    
+    # Get predicted photometry for MIRI bands
+    model_phot_miri = get_model_photometry(spec, wave_spec, miri_filters, zred)
+    model_phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
+    model_phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
+    delta_model = model_phot_miri_upper - model_phot_miri_lower
+    
+    # Initialise the plot
+    fig, ax = plt.subplots(figsize=(8, 5))
     
     # Plot shaded region for 1σ uncertainty
     ax.fill_between(wave_spec_rs, lower_scaled, upper_scaled, color='crimson', alpha=0.2, label='1σ uncertainty')
@@ -160,14 +128,23 @@ def reconstruct(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
     ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
     
     #########    PLOT MODEL PHOTOMETRY     #########
-    wave_phot = np.array([filt.wave_effective for filt in loaded_obs['filters']])  # in Angstroms
+    wave_phot = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
     wave_phot_microns = wave_phot * 1e-4  # convert to µm
-    phot_scaled = phot * maggies_to_muJy  # convert maggies to µJy
+    
+    wave_phot_miri = np.array([filt.wave_effective for filt in obs_miri['filters_miri']])  # in Angstroms
+    wave_phot_miri_microns = wave_phot_miri * 1e-4  # convert to µm
+    
+    phot_scaled = model_phot * maggies_to_muJy  # convert maggies to µJy
+    phot_miri_scaled = model_phot_miri * maggies_to_muJy # convert maggies to µJy
+    delta_model_scaled = delta_model * maggies_to_muJy
+    
     ax.plot(wave_phot_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
+    ax.errorbar(wave_phot_miri_microns, phot_miri_scaled, yerr=delta_model_scaled, fmt='d', markersize=6, color='blue', label='Model photometry (Sedpy)')
+    
     
     #########  PLOT MEASURED PHOTOMETRY    #########
 
-    plot_photometry(ax, obs)
+    plot_photometry(ax, obs_miri)
     # Thanks to the function this is literally a one-liner now
 
     # Compute bounds
@@ -219,24 +196,26 @@ def reconstruct(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
         fit_data = {
             # One entry for the model spectrum + photometry
             'model': {
-                'spec_bestfit': spec,
+                'spec_best': spec,
                 'spec_16th': lower,
                 'spec_50th': median,
                 'spec_84th': upper,
                 'wave_spec': wave_spec,
-                'phot': phot,
-                'wave_phot': wave_phot
+                'sample_specs': all_specs,
+                'phot': model_phot,
+                'phot_miri': model_phot_miri,
+                'wave_phot': wave_phot,
+                'wave_phot_miri': wave_phot_miri
             },
             
             # One entry for the observation dictionary
             'obs': obs,
-            'loaded_obs': loaded_obs,
+            'obs_miri': obs_miri,
 
             # Remaining useful data
             'maggies_to_muJy': maggies_to_muJy,
-            'galaxy_id': objid,
-            'redshift': zred,
-            'saved_at': datetime.now().isoformat()
+            'id': objid,
+            'zred': zred
         }
         
         # Write output to a pickle file
@@ -268,7 +247,10 @@ def plot_photometry(ax, obs, factor=3631e6):
         'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST MIRI (overlaid)', 'ms': 10}
     }
     
-    for i, filt in enumerate(obs['filters']):
+    # Get current labels to prevent duplicates
+    _, labels = ax.get_legend_handles_labels()
+    
+    for i, filt in enumerate(obs['filters_all']):
         name = filt.name.lower()
 
         if 'acs' in name:
@@ -282,13 +264,20 @@ def plot_photometry(ax, obs, factor=3631e6):
         else:
             continue  # skip unknown filters
 
-        #wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
-        #flux = obs['maggies_all'][i] * factor  # µJy
-        #err  = obs['maggies_unc_all'][i] * factor  # µJy
+        wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
+        flux = obs['maggies_all'][i] * factor  # µJy
+        err  = obs['maggies_unc_all'][i] * factor  # µJy
+        
+        # Improved Upper Limit Logic for MIRI
+        uplims = False
+        if 'miri' in name and (flux / err < 3.0):
+            uplims = True
+            flux = 3 * err # Plot at 3-sigma
+            err = flux * 0.2 # Small arrow size for visualization
 
-        wave = obs['phot_wave'][i] * 1e-4  # convert to µm
-        flux = obs['maggies'][i] * factor  # µJy
-        err  = obs['maggies_unc'][i] * factor  # µJy
+        #wave = obs['phot_wave'][i] * 1e-4  # convert to µm
+        #flux = obs['maggies'][i] * factor  # µJy
+        #err  = obs['maggies_unc'][i] * factor  # µJy
         
         ax.errorbar(
             wave, flux, yerr=err,
@@ -297,10 +286,16 @@ def plot_photometry(ax, obs, factor=3631e6):
             markeredgecolor=style.get('edgecolor', 'none'),
             alpha=style.get('alpha', 1.0),
             markersize=10,
-            label=style['label'] if style['label'] not in ax.get_legend_handles_labels()[1] else None
+            uplims=uplims, # This creates the actual downward arrow
+            label=style['label'] if style['label'] not in labels else None
         )
         
-        
+        # Update labels list to prevent duplicates in current loop
+        if style['label'] not in labels:
+            labels.append(style['label'])
+
+def plot_reconstructed_fit(fit_data, outfile=None):
+    return None
 
 def load_and_display(objid, duste=True, mod=None, mod_err=None, outfile=None):
     """Code to load the fit data from the reconstruct function and plot 
