@@ -22,20 +22,21 @@ from matplotlib.image import imread
 
 # This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
-def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
+def reconstruct(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
     """Main function to reconstruct and plot PROSPECTOR results with MIRI data
     
     Parameters:
     -----------
     objid : str
         Galaxy ID of the object of interest
+    phot_table : str
+        Path to the MIRI photometry table
+    data_dir : str
+        Directroy storing the PROSPECTOR h5 output files
     plot_dir : str, optional
         Directory to store the plots in
     stats_dir : str, optional
         Directory to write the fit statistics to
-    add_duste : bool, optional
-        Specify whether dust emission is active or not
-        Defaults to True
     """
     
     print(f"Processing galaxy {objid} =============================")
@@ -56,8 +57,9 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
     full_path = os.path.join(data_dir, h5_file)
     results, loaded_obs, loaded_model = reader.results_from(full_path)
     
+    
     # Build new observations including MIRI
-    obs = build_obs(objid)
+    obs = build_obs(objid, phot_table)
     
     # Now we have to exclude the last 3 parameters from the fit
     map_parameters = get_MAP(results)
@@ -71,18 +73,14 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
         MAP[a] = b
     
     # Section to decide whether to include dust emission or not
-    if add_duste == True:
-        map_parameters = map_parameters[:-3]
-        add_duste = results['run_params']['add_duste']
-        add_agn = results['run_params']['add_agn']  # Maybe check if this is True?
-    else:
-        map_parameters = map_parameters[:-6]
-        add_agn = False
+    #map_parameters = map_parameters[:-3]
+    add_duste = results['run_params']['add_duste']
+    add_agn = results['run_params']['add_agn']  # Maybe check if this is True?
         
     # Get accurate redshifts from the MAP (obtained by MJ)    
     zred = map_parameters[0]
 
-    loaded_obs['mask'] = mask_obs(loaded_obs, zred)
+    #loaded_obs['mask'] = mask_obs(loaded_obs, zred)
     
     # Build model matching original setup    
     # Somehow this works if zred=objid and waverange=zred, but not if I pass the arguments correctly
@@ -94,35 +92,15 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
                         fit_afe=results['run_params']['fit_afe']
                         )
     
-    model.params['polyorder'] = 10
-
-    print("New model.ndim:", model.ndim)
-    print("New model.theta_index:", model.theta_index)
-    print("New model theta_labels:", [model.theta_labels()[i] for i in range(model.ndim)])
-
-    # Map parameters from original fit to new model structure
-    new_theta_labels = [model.theta_labels()[i] for i in range(model.ndim)]
-    new_map_parameters = []
+    #print(f"Model expects {model.ndim} parameters.")
+    #print(f"Model free parameters: {model.theta_labels}")
+    #print(f"Your MAP vector length: {len(map_parameters)}")
     
-    # Create mapping between old and new parameter structures
-    for new_label in new_theta_labels:
-        if new_label in original_theta_labels:
-            old_idx = original_theta_labels.index(new_label)
-            new_map_parameters.append(original_map_parameters[old_idx])
-            #print(f"Mapped {new_label}: {original_map_parameters[old_idx]}")
-        else:
-            # This shouldn't happen if we're just removing dust parameters
-            print(f"Warning: {new_label} not found in original parameters")
-            new_map_parameters.append(0.0)  # Default value
+    #model.params['polyorder'] = 10
 
-    new_map_parameters = np.array(new_map_parameters)
-
-    #print(f"Original parameters length: {len(original_map_parameters)}")
-    #print(f"New parameters length: {len(new_map_parameters)}")
-    #print(f"New model expects: {model.ndim} parameters")
     
-    for a,b in zip(results['theta_labels'],map_parameters):
-        print(a, b)
+    #for a,b in zip(results['theta_labels'], map_parameters):
+    #    print(a, b)
     
     #print("Adjusted length of map_parameters: ", len(map_parameters), "\n")
 
@@ -130,7 +108,7 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
     sps = FastStepBasis(zcontinuous=1)
 
     # Obtain best fit model spectrum and model photometry    
-    spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
+    spec, phot, _ = loaded_model.predict(map_parameters, obs=loaded_obs, sps=sps)
     
     maggies_to_muJy = 3631e6 # maggies to µJy conversion factor
     
@@ -143,20 +121,6 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
     maggies = np.array(obs['maggies'])
     maggies_unc = np.array(obs['maggies_unc'])
 
-    assert len(phot) == len(maggies), 'Model photometry does not match observed photometry length'
-    
-    # Compute ratio and weights
-    ratio = maggies / phot
-    weights = 1.0 / maggies_unc**2
-
-    # Weighted average correction factor
-    corr_factor = np.sum(ratio * weights) / np.sum(weights)
-
-    # Compute uncertainty on correction factor
-    residuals = ratio - corr_factor
-    weighted_var = np.sum(weights * residuals**2) / np.sum(weights)
-    corr_uncertainty = np.sqrt(weighted_var / len(ratio))
-        
     # Initialise the plot
     fig, ax = plt.subplots(figsize=(8, 5))
     
@@ -167,8 +131,7 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
     
     all_specs = []
     for params_i in samples:
-        params_i = params_i[:-3]
-        spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
+        spec_i, _, _ = loaded_model.predict(params_i, obs=loaded_obs, sps=sps)
         all_specs.append(spec_i)
         
     all_specs = np.array(all_specs)  # shape: (nsample, nwave)
@@ -197,8 +160,7 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
     ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
     
     #########    PLOT MODEL PHOTOMETRY     #########
-    
-    wave_phot = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
+    wave_phot = np.array([filt.wave_effective for filt in loaded_obs['filters']])  # in Angstroms
     wave_phot_microns = wave_phot * 1e-4  # convert to µm
     phot_scaled = phot * maggies_to_muJy  # convert maggies to µJy
     ax.plot(wave_phot_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
@@ -207,7 +169,7 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
 
     plot_photometry(ax, obs)
     # Thanks to the function this is literally a one-liner now
-    
+
     # Compute bounds
     wave_mask = (wave_spec_rs >= 0.4) & (wave_spec_rs <= 35)
     
@@ -269,17 +231,9 @@ def reconstruct(objid, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
             # One entry for the observation dictionary
             'obs': obs,
             'loaded_obs': loaded_obs,
-            
-            # Alignment between the model and observed photometry
-            'alignment': {
-                'ratio': ratio,
-                'corr_factor': corr_factor,
-                'corr_uncertainty': corr_uncertainty,
-                'weights': weights,
-                'maggies_to_muJy': maggies_to_muJy
-            },
 
             # Remaining useful data
+            'maggies_to_muJy': maggies_to_muJy,
             'galaxy_id': objid,
             'redshift': zred,
             'saved_at': datetime.now().isoformat()
