@@ -9,24 +9,14 @@ import fsps
 import prospect.io.read_results as reader
 from .params import build_obs, build_model, get_MAP
 from .plotting import load_and_display
-from sedpy.observate import getSED
 from astropy import constants as const
 from astropy.io import fits
 from astropy.cosmology import WMAP9 as cosmo
 from prospect.models.transforms import logsfr_ratios_to_sfrs
 
 
-def get_model_photometry(spec, wave_spec, filters, zred):
-    # wave_spec is rest-frame, convert to observer-frame
-    wave_obs = wave_spec * (1 + zred)
-    
-    # Prospector 'spec' is in maggies (f_nu). 
-    # sedpy.getSED can work with this directly if you treat it as f_nu.
-    phot_maggies = getSED(wave_obs, spec, filterlist=filters)
-    
-    return phot_maggies
 
-def compute_residuals(objid, show_plot=True):
+def compute_residuals(filename):
     """Calculate the residuals between the Prospector model photometry and the observed photometry for a given object ID.
 
     Args:
@@ -37,95 +27,83 @@ def compute_residuals(objid, show_plot=True):
         rows (dict): Dictionary containing the computed residuals and other relevant data.
     """
     
-    try:
-        pkl_file = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_files/{objid}.pkl'
-        
-        with open(pkl_file, 'rb') as f:
+    try:    # try to open
+        with open(filename, 'rb') as f:
             fit_data = pkl.load(f)
-            
     except FileNotFoundError:
-        print(f"File {pkl_file} not found. Please check the object ID or file path.")
-        return None
-
-    print('======================================')
-    print(f"Analysing fit data for galaxy {objid}...")
-
+        print(f"⚠️ Attention: File {filename} not found. Skipping...")
+        return 
+    
+    gid = fit_data['id']
+    zred = fit_data['zred']
+    
+    model = fit_data['model']
+    spec_best = model['spec_best']
+    spec_16th = model['spec_16th']
+    spec_median = model['spec_median']
+    spec_84th = model['spec_84th']
+    wave_spec = model['wave_spec']
+    sample_specs = model['sample_specs']
+    phot = model['phot']
+    phot_miri = model['phot_miri']
+    phot_miri_err = model['phot_miri_err']
+    wave_phot = model['wave_phot']
+    wave_phot_miri = model['wave_phot_miri']
+    
     obs = fit_data['obs']
+    obs_miri = fit_data['obs_miri']
+    maggies_to_muJy = fit_data['maggies_to_muJy']
+    
+    # Convert to µJy
+    lower_scaled = spec_16th * maggies_to_muJy    
+    median_scaled = spec_median * maggies_to_muJy
+    upper_scaled = spec_84th * maggies_to_muJy
+    spec_scaled = spec_best * maggies_to_muJy
+    
+    wave_phot_microns = wave_phot * 1e-4  # convert to µm
+    wave_phot_miri_microns = wave_phot_miri * 1e-4  # convert to µm
+    
+    phot_scaled = phot * maggies_to_muJy
+    phot_miri_scaled = phot_miri * maggies_to_muJy
+    phot_miri_err_scaled = phot_miri_err * maggies_to_muJy
+    
+    wave_spec_rs = wave_spec * 1e-4 * (1+zred)
     
     filters = obs['filters']
-    filters_all = obs['filters_all']
+    filters_all = obs_miri['filters_all']
     
     if len(filters) == len(filters_all):
         print("⚠️It seems like there are no MIRI data available...Skipping")
         return None  # No MIRI bands, nothing to do
     
-    wave_phot_all = obs['phot_wave_all']
-    maggies_all = obs['maggies_all']
-    model = fit_data['model']
-    
-    wave_spec = model['wave_spec']
-    spec = model['spec_bestfit']
-    spec_16th = model['spec_16th']
-    spec_84th = model['spec_84th']
-    
-    phot = model['phot']
-    wave_phot = model['wave_phot']
-    
-    zred = fit_data['redshift']
-    
-    # Compare to stored obs
-    obs_flux = obs['maggies']
-    obs_err  = obs['maggies_unc']
-    
-    # Use sedpy to compute the model photometry in the MIRI bands
-    phot_new = get_model_photometry(spec, wave_spec, filters, zred)
-    phot_new_all = get_model_photometry(spec, wave_spec, filters_all, zred)
-
-    phot_16th = get_model_photometry(spec_16th, wave_spec, filters_all, zred)
-    phot_84th = get_model_photometry(spec_84th, wave_spec, filters_all, zred)
-    
-    # Calculate the ratio between my model photometry and the Prospector model photometry
-    ratio = phot_new / phot
-    
-    phot_new_all /= ratio.mean()  # normalise to match
-    phot_84th /= ratio.mean()
-    phot_16th /= ratio.mean()
+    phot_wave_all = obs_miri['phot_wave_all']
     
     # Extract model predictions at MIRI bands
-    miri_mask = (wave_phot_all > 75000) & (wave_phot_all < 300000)  # AA
-    model_flux = phot_new_all[miri_mask]
-    model_err  = 0.5 * (phot_84th[miri_mask] - phot_16th[miri_mask]) # approximate error for the prospector fit
+    miri_mask = (phot_wave_all > 75000) & (phot_wave_all < 300000)  # AA
     
     # Extract obs at MIRI bands
-    obs_wave = obs['phot_wave_all']
-    obs_flux = obs['maggies_all']
-    obs_err  = obs['maggies_unc_all']
+    obs_wave = phot_wave_all[miri_mask]
+    obs_flux = obs_miri['maggies_all'][miri_mask]
+    obs_miri_err  = obs_miri['maggies_unc_all'][miri_mask]
     
-    obs_wave = obs_wave[miri_mask]
-    obs_flux = obs_flux[miri_mask]
-    obs_err  = obs_err[miri_mask]
-
-    if show_plot: load_and_display(objid, mod=model_flux, mod_err=model_err, outfile=f"/Users/benjamincollins/University/Master/Red_Cardinal/prospector/fits_v3/{objid}.png")
-
     # Compute N_sigma
-    delta = obs_flux - model_flux
+    delta = obs_flux - phot_miri
+    tot_err = np.sqrt(phot_miri_err**2 + obs_miri_err**2)
+    N_sigma = delta / tot_err
     
     # Compute it also in percentage of observed MIRI flux
     perc = delta / obs_flux
-    
-    tot_err = np.sqrt(model_err**2 + obs_err**2)
-    N_sigma = delta / tot_err
     
     # Filters for MIRI bands
     miri_bands = [f for f, keep in zip(filters_all, miri_mask) if keep]    
     
     rows = []
     for f, lam, nsig, obs, obs_err, mod, mod_err, p in zip(
-        miri_bands, obs_wave, N_sigma, obs_flux, obs_err, model_flux, model_err, perc
+        miri_bands, obs_wave, N_sigma, obs_flux, obs_err, phot_miri, phot_miri_err, perc
     ):   
     
         rows.append({
-            "galaxy_id": objid,
+            "galaxy_id": gid,
             "zred": zred,
             "filter_name": f.name,
             "obs_wave": lam,
@@ -134,18 +112,10 @@ def compute_residuals(objid, show_plot=True):
             "model_flux": mod,
             "model_err": mod_err,
             "N_sigma": nsig,
-            "perc_diff": p,
-            "mean_ratio": ratio.mean(),
-            "std_ratio": ratio.std()
+            "perc_diff": p
         })
     
-    print("Sigmas: ", N_sigma)
-    print("Percentage difference:", perc)
     
-    if objid == '8465': 
-        print("⚠️ Found galaxy with ID 8465, printing stats")
-    
-    return rows
 
 def get_galaxy_properties(gid, phot_miri, non_detections=None):
     """Obtain the star formation rates (SFRs) from the Prospector fit for a given galaxy ID.
@@ -160,7 +130,6 @@ def get_galaxy_properties(gid, phot_miri, non_detections=None):
     # ============================
     # Part related to PROSPECTOR
     # ============================
-    prospect_dir = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
     
     # Load the h5 file for the given objid
     h5_path = os.path.join(prospect_dir, f"output_{gid}*.h5")
