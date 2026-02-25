@@ -5,10 +5,8 @@ import matplotlib.pyplot as plt
 import pickle as pkl
 from datetime import datetime
 import pandas as pd
-import fsps
 import prospect.io.read_results as reader
 from .params import build_obs, build_model, get_MAP
-from .plotting import load_and_display
 from astropy import constants as const
 from astropy.io import fits
 from astropy.cosmology import WMAP9 as cosmo
