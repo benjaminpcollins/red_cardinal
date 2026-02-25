@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import Normalize, ListedColormap
 import pickle as pkl
-from scipy.stats import norm
+from scipy.stats import norm, median_abs_deviation
 import prospect.io.read_results as reader
 from prospect.sources import FastStepBasis
 from prospect.utils.plotting import posterior_samples
@@ -208,9 +208,10 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
         
         fit_quality[name] = {
             'n_sigma': N_sigma[i],
-            'frac_diff' : perc[i],
-            'flux': miri_flux[i] * maggies_to_muJy,
-            'flux_err': miri_err[i] * maggies_to_muJy
+            'obs_flux': miri_flux[i] * maggies_to_muJy,
+            'obs_err': miri_err[i] * maggies_to_muJy,
+            'mod_flux': phot_miri[i] * maggies_to_muJy,
+            'mod_err': phot_miri_err[i] * maggies_to_muJy
         }
     
     print("Computed fit quality statistics")
@@ -444,28 +445,74 @@ def plot_reconstructed_fit(filename, plot_dir):
     return
 
 
-def create_hist(csv_path, out_dir, bins=25):
+
+
+
+
+def plot_quality_stats(pickle_dir, out_dir, bins=25):
     """
     Create a histogram of the N_sigma values for all galaxies and for all bands as stored in the csv file.
     """
-    try:
-        df = pd.read_csv(csv_path)
-    except FileNotFoundError:
-        print(f"File {csv_path} not found. Please check the file path.")
-        return
     
-    print(f"Loaded {len(df)} rows from {csv_path}")
+    pickle_files = glob.glob(f'{pickle_dir}/*.pkl')
     
-    print(len(df['galaxy_id'].unique()))
+    all_data = []
+    reduced_chi2_list = []
+
+    # 1. DATA EXTRACTION
+    for filename in pickle_files:
+        with open(filename, 'rb') as f:
+            data = pkl.load(f)
+            
+        gid = data['id']
+        fit_quality = data.get('fit_quality', {})
+        
+        # Store global per-galaxy stats
+        if 'chi2_red' in fit_quality:
+            reduced_chi2_list.append({
+                'galaxy_id': gid,
+                'reduced_chi2': fit_quality['chi2_red'],
+                'n_filters': len(fit_quality) - 1 # Assuming only 'chi2_red' is non-filter
+            })
+
+        # Store per-band stats
+        for i, (key, val) in enumerate(fit_quality.items()):
+            if isinstance(val, dict): # This identifies the filter entries
+                all_data.append({
+                    'galaxy_id': gid,
+                    'filter_name': key,
+                    'N_sigma': val.get('n_sigma'),
+                    'flux': val.get('flux'),
+                    'flux_err': val.get('flux_err'),
+                    'frac_diff': val.get('frac_diff')
+                })
+
+    df = pd.DataFrame(all_data)
+    chi2_df = pd.DataFrame(reduced_chi2_list)
     
+    print("Extracted data!")
+    
+    """    
+    fit_quality['chi2_red'] = chi2_red,
+    
+    for i, filt in enumerate(obs_miri['filters_miri']):
+        
+        # Extracts 'F770W' from 'jwst_f770w'
+        name = filt.name.split('_')[-1].upper()
+        
+        fit_quality[name] = {
+            'n_sigma': N_sigma[i],
+            'frac_diff' : perc[i],
+            'flux': miri_flux[i] * maggies_to_muJy,
+            'flux_err': miri_err[i] * maggies_to_muJy
+        }
+    """
+        
     # Create output folder
     os.makedirs(out_dir, exist_ok=True)
 
     # Compute global x-axis limits (clip outliers if needed)
     #x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
-    
-
-    filters = df['filter_name'].unique()
 
     # Example: sort filters by central wavelength
     # (replace this mapping with your actual filters & λ)
@@ -480,17 +527,20 @@ def create_hist(csv_path, out_dir, bins=25):
     colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']  # Distinct colors per band
 
     # Sort filter names by wavelength
-    filters_sorted = sorted(filters,
-                            key=lambda f: filter_wavelengths.get(f, np.inf))
+    #filters_sorted = sorted(filters, key=lambda f: filter_wavelengths.get(f, np.inf))
     
-    # Make a 2x2 grid
+    # PLOT 1: N_SIGMA HISTOGRAMS
     fig, axes = plt.subplots(2, 2, figsize=(10, 9), sharex=False, sharey=True)
     axes = axes.flatten()  # easier to index
 
-    for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
-        subset = df[df['filter_name'] == f]
+    print("Initialised axes")
+
+    for i, (ax, band) in enumerate(zip(axes, bands)):
+        subset = df[df['filter_name'] == band]
+        nsigmas = subset['N_sigma']
+        if len(nsigmas) == 0: continue
         
-        ax.set_title(f'{bands[i]}')
+        ax.set_title(f'{band}')
         #ax.set_xlim(x_min, x_max)
         ax.set_xlabel(r'$N_\sigma$')
         ax.set_ylabel('Number of galaxies')
@@ -498,10 +548,11 @@ def create_hist(csv_path, out_dir, bins=25):
         #if i in [0,1]: ax.set_ylim(0, 24)
         #elif i in [2,3]: ax.set_ylim(0,12)
 
-        nsigmas = subset['N_sigma']
         # Add compact statistics
         mean_ratio = np.mean(nsigmas)
+        median_ratio = np.median(nsigmas)
         std_ratio = np.std(nsigmas)
+        mad_ratio = median_abs_deviation(nsigmas)
         N = len(subset['galaxy_id'].unique())
         num = f'N = {N}'
         
@@ -513,20 +564,20 @@ def create_hist(csv_path, out_dir, bins=25):
 
         x = np.linspace(x_min, x_max, 500)
         gaussian_norm = norm.pdf(x, loc=0, scale=1)
-        gaussian_obs = norm.pdf(x, loc=mean_ratio, scale=std_ratio)
+        gaussian_obs = norm.pdf(x, loc=median_ratio, scale=mad_ratio)
 
         # Scale Gaussians to match histogram counts
         gaussian_norm_scaled = gaussian_norm * len(nsigmas) * (bin_edges[1] - bin_edges[0])
         gaussian_obs_scaled = gaussian_obs * len(nsigmas) * (bin_edges[1] - bin_edges[0])
         
         ax.plot(x, gaussian_norm_scaled, 'gray', lw=2, alpha=1, label=r'$\mathcal{N}(0,1)$')
-        ax.plot(x, gaussian_obs_scaled, colors[i], lw=2, alpha=1, label=r'$\mathcal{N}'+f'({mean_ratio:.2f},{std_ratio:.2f})$')
+        ax.plot(x, gaussian_obs_scaled, colors[i], lw=2, alpha=1, label=r'$\mathcal{N}'+f'({median_ratio:.2f},{mad_ratio:.2f})$')
         
         median_ratio = np.median(nsigmas)
         
-        stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
+        stats_text = f'Med={median_ratio:.2f}\nMAD={mad_ratio:.2f}\n{num}'
         ax.legend()
-        ax.text(0.8, 0.75, stats_text, transform=ax.transAxes, fontsize=10,
+        ax.text(0.8, 0.84, stats_text, transform=ax.transAxes, fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         
         # Annotate in the top-right corner (adjust x,y if needed)
@@ -537,32 +588,35 @@ def create_hist(csv_path, out_dir, bins=25):
     #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_all_filters_gauss_v4.png')
+    filename = os.path.join(out_dir, 'Nsigma_gauss.png')
     plt.savefig(filename, dpi=300)
     plt.show()
     
     
-    # Make a 2x2 grid
+    
+    
+    # PLOT 2: LOG RATIOS
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=True)
     axes = axes.flatten()  # easier to index
 
-    for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
-        subset = df[df['filter_name'] == f]
+    for i, (ax, band) in enumerate(zip(axes, bands)):
+        subset = df[df['filter_name'] == band]
         
-        # Exclude non-detections from the plots    
-        non_detections = {
-            'F770W': [11137, 17793, 8843, 12175, 7696, 7185, 8465, 19098, 12443, 12202, 21547, 9517, 9901, 10415, 12213, 
-                    21451, 11853, 11086, 22606, 18769, 9809, 11481, 21472, 19681, 12513, 21218, 12133, 16615, 10600, 11247, 
-                    20720, 17534, 11723], # Added 11723 since the fit is weird 
-            'F1000W': [17984, 12513, 12164, 12133, 11716, 16615, 16424, 12202, 11723, 11853, 13297, 18327, 12443, 17534], 
-            'F1800W': [12164, 11716, 10565, 10054, 11723, 12175, 19024, 8465, 8338, 18769, 7102, 10400, 12513, 19681, 7904, 
-                    10339, 12133, 10600, 9517, 10415, 11247, 12213, 11451, 7934, 18977], # Added 18977 since the fit is weird 
-            'F2100W': [17984, 12164, 11716, 16516, 11723, 11853, 12175, 16474, 12443, 12513, 12133, 16615, 16424, 12202, 
-                    12332, 17517, 12014, 11247, 13297, 12213, 17916, 17534]
-            }
+        f_obs = subset['flux']
+        err = subset['flux_err']
+        frac_diff = subset['frac_diff']
         
-        for nd in non_detections[bands[i]]:
-            subset = subset[subset['galaxy_id'] != nd]
+        # SNR filter: Keep only detections > 3-sigma
+        snr_mask = (f_obs / err) >= 3.0
+        
+        # Model reconstruction
+        # Using the simplified: f_model = f_obs * (1 - frac_diff)
+        # We filter out frac_diff >= 1 to avoid log(0) or log(negative)
+        valid_mask = (frac_diff < 1.0) & snr_mask
+        
+        # Calculate ratios only for valid entries
+        # log10(f_obs / (f_obs * (1-frac_diff))) reduces to -log10(1-frac_diff)
+        log_ratios = -np.log10(1.0 - frac_diff[valid_mask])
         
         ax.set_title(f'{bands[i]}')
         #ax.set_xlim(x_min, x_max)
@@ -571,17 +625,13 @@ def create_hist(csv_path, out_dir, bins=25):
         
         #if i in [0,1]: ax.set_ylim(0, 24)
         #elif i in [2,3]: ax.set_ylim(0,12)
-
-        f_obs = subset['obs_flux']
-        f_model = subset['model_flux']
-        
-        log_ratios = np.log10(f_obs / f_model)
         
         # Add compact statistics
         mean_logr = np.mean(log_ratios)
         std_logr = np.std(log_ratios)
         median_logr = np.median(log_ratios)
-        N = len(subset['galaxy_id'].unique())
+        mad_logr = median_abs_deviation(log_ratios)
+        N = len(log_ratios)
         num = f'N = {N}'
         
         x_min = -1.2
@@ -589,11 +639,11 @@ def create_hist(csv_path, out_dir, bins=25):
         bins = np.linspace(x_min, x_max, 25)
         
         ax.hist(log_ratios, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
-        stats_text = f'μ={mean_logr:.2f}\nσ={std_logr:.2f}\nMed={median_logr:.2f}\n\n{num}'
+        stats_text = f'Med={median_logr:.2f}\nMAD={mad_logr:.2f}\n{num}'
         if i == 2: 
             stats_text += ' (*)'
             print(log_ratios[log_ratios > 1])
-        ax.text(0.025, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+        ax.text(0.025, 0.82, stats_text, transform=ax.transAxes, fontsize=10,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         #ax.set_ylim(0, N//2+1)
         # Annotate in the top-right corner (adjust x,y if needed)
@@ -607,6 +657,8 @@ def create_hist(csv_path, out_dir, bins=25):
     filename = os.path.join(out_dir, 'log_ratios.png')
     plt.savefig(filename, dpi=300)
     plt.show()
+    
+    return
     """
     # Plot histograms for galaxies    
     galaxies = df['galaxy_id'].unique()
@@ -636,7 +688,7 @@ def create_hist(csv_path, out_dir, bins=25):
     """
 
     # Compute reduced chi^2 per galaxy
-    reduced_chi2 = []
+    
 
     for gal in df['galaxy_id'].unique():
         subset = df[df['galaxy_id'] == gal]
