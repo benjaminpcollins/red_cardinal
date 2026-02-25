@@ -42,7 +42,7 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
         Directory to write the fit statistics to
     """
     
-    print(f"Processing galaxy {objid} =============================")
+    print(f"============ Processing galaxy {objid} ========================")
     
     # Be sure that objid is an integer
     objid = int(objid)
@@ -123,6 +123,8 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
     mass_in_last_30 = np.sum(sfrs * overlap30)
     sfr_last30 = mass_in_last_30 / t30
     
+    print("Extracted galaxy properties...")
+    
     ##########################################
     #
     # Section 2: Rebuilding the PROSPECTOR fit
@@ -173,6 +175,8 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
     phot_wave_all = np.array([filt.wave_effective for filt in obs_miri['filters_all']])  # in Angstroms
     phot_wave_miri = np.array([filt.wave_effective for filt in obs_miri['filters_miri']])  # in Angstroms
     
+    print("Successfully reconstructed fit...")
+    
     ##########################################
     #
     # Section 3: Calculating fit quality stats
@@ -181,16 +185,16 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
     
     # Safer way to ensure you align with phot_miri
     n_orig = len(obs['filters'])
-    obs_flux = obs_miri['maggies_all'][n_orig:] 
-    obs_err  = obs_miri['maggies_unc_all'][n_orig:]
+    miri_flux = obs_miri['maggies_all'][n_orig:] 
+    miri_err  = obs_miri['maggies_unc_all'][n_orig:]
     
     # Compute N_sigma
-    delta = obs_flux - phot_miri
-    tot_err = np.sqrt(phot_miri_err**2 + obs_err**2)
+    delta = miri_flux - phot_miri
+    tot_err = np.sqrt(phot_miri_err**2 + miri_err**2)
     N_sigma = delta / tot_err
     
     # Compute it also in percentage of observed MIRI flux
-    perc = delta / obs_flux
+    perc = delta / miri_flux
     
     chi2_red = np.sum(N_sigma**2) / len(N_sigma)
     
@@ -204,8 +208,12 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
         
         fit_quality[name] = {
             'n_sigma': N_sigma[i],
-            'frac_diff' : perc[i]
+            'frac_diff' : perc[i],
+            'flux': miri_flux[i] * maggies_to_muJy,
+            'flux_err': miri_err[i] * maggies_to_muJy
         }
+    
+    print("Computed fit quality statistics")
     
     os.makedirs(stats_dir, exist_ok=True)
     
@@ -250,7 +258,7 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
     # Write output to a pickle file
     with open(filename, 'wb') as f:
         pkl.dump(data, f)
-    print(f"💾 Successfully saved data to {filename}")
+    print(f"💾 Saved data to {filename}")
         
     if plot_dir:
         plot_reconstructed_fit(filename, plot_dir)
@@ -280,33 +288,32 @@ def plot_photometry(ax, obs, factor=3631e6):
     _, labels = ax.get_legend_handles_labels()
     
     for i, filt in enumerate(obs['filters_all']):
-
+        
         wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
         flux = obs['maggies_all'][i] * factor  # µJy
         err  = obs['maggies_unc_all'][i] * factor  # µJy
         
+        uplims = False
+        
         name = filt.name.lower()
         
-        if 'acs' in name:
+        if 'acs_wfc' in name:
             style = instrument_styles['acs']
-        elif 'wfc3' in name:
+        elif 'wfc3_ir' in name:
             style = instrument_styles['wfc3']
         elif 'miri' in name or any(m in name for m in ['f770w', 'f1000w', 'f1800w', 'f2100w']):
             style = instrument_styles['miri']
-            
+            # Improved Upper Limit Logic for MIRI
+            if (flux / err < 3.0):
+                uplims = True
+                flux = 3 * err # Plot at 3-sigma
+                err = flux * 0.4 # Small arrow size for visualisation
             
         elif 'nircam' in name or ('jwst' in name and 'f' in name and 'w' in name):
             style = instrument_styles['nircam']
         else:
             continue  # skip unknown filters
 
-        
-        # Improved Upper Limit Logic for MIRI
-        uplims = False
-        if 'miri' in name and (flux / err < 3.0):
-            uplims = True
-            flux = 3 * err # Plot at 3-sigma
-            err = flux * 0.2 # Small arrow size for visualization
 
         ax.errorbar(
             wave, flux, yerr=err,
@@ -385,7 +392,8 @@ def plot_reconstructed_fit(filename, plot_dir):
     #########    PLOT MODEL PHOTOMETRY     #########
     
     ax.plot(phot_wave_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
-    ax.errorbar(phot_wave_miri_microns, phot_miri_scaled, yerr=phot_miri_err_scaled, fmt='d', markersize=6, color='blue', label='Model photometry (Sedpy)')
+    ax.errorbar(phot_wave_miri_microns, phot_miri_scaled, yerr=phot_miri_err_scaled, fmt='d', markersize=6, color='blue')
+    #ax.plot(phot_wave_miri_microns, phot_miri_scaled, 'd', markersize=6, color='black')
     
     #########  PLOT MEASURED PHOTOMETRY    #########
 
@@ -415,7 +423,10 @@ def plot_reconstructed_fit(filename, plot_dir):
     ax.set_xlim(0.4, 35)#200)    # Change x range    
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.legend(loc="lower right")
+    if gid in [7549, 7696, 8013, 9395, 10339, 10400, 11142, 11247, 11494, 12133, 12175, 12332, 21472, 21477]:
+        ax.legend(loc="lower right")
+    else:
+        ax.legend(loc="upper left")
     #ax.set_title(f"Galaxy {objid} at z={np.round(zred,2)}", fontsize=14)
 
     ax.tick_params(axis='both', which='major', labelsize=13)
