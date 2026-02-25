@@ -14,6 +14,7 @@ from .params import get_MAP, update_obs_with_miri
 from astropy.cosmology import Planck18 as cosmo
 from astropy import units as u
 from .params import get_model_photometry
+from astropy.table import Table
 
 from astropy.io import fits
 from astropy.visualization import ZScaleInterval, ImageNormalize, AsinhStretch
@@ -42,229 +43,253 @@ def process_fit(objid, phot_table, data_dir, plot_dir=None, stats_dir=None):
         Directory to write the fit statistics to
     """
     
-    print(f"============ Processing galaxy {objid} ========================")
+    with fits.open(phot_table) as hdul:
+        galaxy_ids = int(hdul[1].data['ID'])
     
-    # Be sure that objid is an integer
-    objid = int(objid)
+    # Store fit statistics in a CSV file    
+    rows = []
     
-    ######################################
-    #
-    # Section 1: Getting galaxy properties
-    #
-    ######################################
-    
-    # Load the h5 file for the given objid
-    h5_file = glob.glob(os.path.join(data_dir, f"output_{objid}*.h5"))
-    
-    try:
-        h5_file = h5_file[0]
-    except IndexError:
-        print(f"No PROSPECTOR results found for objid {objid}.")
-        return None
-
-    # Load PROSPECTOR results
-    full_path = os.path.join(data_dir, h5_file)
-    results, obs, model = reader.results_from(full_path)
-    
-    # Now we have to exclude the last 3 parameters from the fit
-    map_parameters = get_MAP(results)
-    
-    # Build the MAP dictionary
-    MAP = {}
-    for a,b in zip(results['theta_labels'], map_parameters):
-        MAP[a] = b
-
-    zred = MAP['zred']
-    logmass = MAP['logmass']
-    dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
-    
-    """
-    dust_tesc – (default: 7.0) 
-        Stars younger than dust_tesc are attenuated by both dust1 and dust2, 
-            while stars older are attenuated by dust2 only. Units are log(yrs).
-    dust1 – (default: 0.0) 
-        Dust parameter describing the attenuation of young stellar light, 
-            i.e. where t <= dust_tesc (for details, see Conroy et al. 2009a).
-    dust2 – (default: 0.0) 
-        Dust parameter describing the attenuation of old stellar light, 
-        i.e. where t > dust_tesc (for details, see Conroy et al. 2009a).
-
-    Summary taken from https://dfm.io/python-fsps/current/stellarpop_api/#fsps.StellarPopulation.dust_mass
-    """ 
-    
-    # Reconstruct agebins used in the fits
-    tuniv = cosmo.age(zred).value
-    agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
-    agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
-    agebins = np.array([agelims[:-1], agelims[1:]]).T
-    nbins = len(agelims) - 1
-    
-    # Collect logsfr_ratios
-    logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
-    
-    # Convert to SFRs
-    sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
-    
-    # Convert log age bins to linear time (yr)
-    bin_edges = 10**agebins  # shape (nbins, 2)
-    
-    # Select bins younger than a certain timescale
-    t100 = 1e8  # 100 Myr in years
-    t30 = 3e7   #  30 Myr in years
-    
-    # Compute overlap of each bin with interval [0, tcut]
-    overlap100 = np.maximum(0.0, np.minimum(bin_edges[:,1], t100) - np.minimum(bin_edges[:,0], t100))
-    overlap30 = np.maximum(0.0, np.minimum(bin_edges[:,1], t30) - np.minimum(bin_edges[:,0], t30))
-    
-    # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
-    mass_in_last_100 = np.sum(sfrs * overlap100)
-    sfr_last100 = mass_in_last_100 / t100
-
-    mass_in_last_30 = np.sum(sfrs * overlap30)
-    sfr_last30 = mass_in_last_30 / t30
-    
-    print("Extracted galaxy properties...")
-    
-    ##########################################
-    #
-    # Section 2: Rebuilding the PROSPECTOR fit
-    #
-    ##########################################
-    
-    # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
-    sps = FastStepBasis(zcontinuous=1)
-
-    # Obtain best fit model spectrum and model photometry    
-    spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
-    
-    # Convert maggies to µJy
-    maggies_to_muJy = 3631e6
-    
-    # Wavelengths of the model spectrum
-    wave_spec = sps.wavelengths
-    
-    # Convert to arrays
-    phot = np.array(phot)
-    
-    # Draw 100 posterior samples
-    samples = posterior_samples(results, 100)
-    
-    sample_specs = []
-    for params_i in samples:
-        spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
-        sample_specs.append(spec_i)
-    sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
-    
-    # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
-    lower = np.percentile(sample_specs, 16, axis=0)
-    median = np.percentile(sample_specs, 50, axis=0)
-    upper = np.percentile(sample_specs, 84, axis=0)
-    
-    # Extend the obs dictionary with MIRI photometry for plotting
-    obs_miri = update_obs_with_miri(objid, obs, phot_table)
-    miri_filters = obs_miri['filters_miri']
-    
-    # Get predicted photometry for MIRI bands (+ Errors)
-    phot_miri = get_model_photometry(spec, wave_spec, miri_filters, zred)
-    phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
-    phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
-    phot_miri_err = 0.5*(phot_miri_upper - phot_miri_lower)
-    
-    # Compute filter wavelength in microns
-    phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
-    phot_wave_all = np.array([filt.wave_effective for filt in obs_miri['filters_all']])  # in Angstroms
-    phot_wave_miri = np.array([filt.wave_effective for filt in obs_miri['filters_miri']])  # in Angstroms
-    
-    print("Successfully reconstructed fit...")
-    
-    ##########################################
-    #
-    # Section 3: Calculating fit quality stats
-    #
-    ##########################################
-    
-    # Safer way to ensure you align with phot_miri
-    n_orig = len(obs['filters'])
-    miri_flux = obs_miri['maggies_all'][n_orig:] 
-    miri_err  = obs_miri['maggies_unc_all'][n_orig:]
-    
-    # Compute N_sigma
-    delta = miri_flux - phot_miri
-    tot_err = np.sqrt(phot_miri_err**2 + miri_err**2)
-    N_sigma = delta / tot_err
-    
-    # Compute it also in percentage of observed MIRI flux
-    perc = delta / miri_flux
-    
-    chi2_red = np.sum(N_sigma**2) / len(N_sigma)
-    
-    fit_quality = {}
-    fit_quality['chi2_red'] = chi2_red,
-    
-    for i, filt in enumerate(obs_miri['filters_miri']):
+    for objid in galaxy_ids:
         
-        # Extracts 'F770W' from 'jwst_f770w'
-        name = filt.name.split('_')[-1].upper()
+        print(f"============ Processing galaxy {objid} ========================")
         
-        fit_quality[name] = {
-            'n_sigma': N_sigma[i],
-            'obs_flux': miri_flux[i] * maggies_to_muJy,
-            'obs_err': miri_err[i] * maggies_to_muJy,
-            'mod_flux': phot_miri[i] * maggies_to_muJy,
-            'mod_err': phot_miri_err[i] * maggies_to_muJy
+        ######################################
+        #
+        # Section 1: Getting galaxy properties
+        #
+        ######################################
+        
+        # Load the h5 file for the given objid
+        h5_file = glob.glob(os.path.join(data_dir, f"output_{objid}*.h5"))
+        
+        try:
+            h5_file = h5_file[0]
+        except IndexError:
+            print(f"No PROSPECTOR results found for objid {objid}.")
+            return None
+
+        # Load PROSPECTOR results
+        full_path = os.path.join(data_dir, h5_file)
+        results, obs, model = reader.results_from(full_path)
+        
+        # Now we have to exclude the last 3 parameters from the fit
+        map_parameters = get_MAP(results)
+        
+        # Build the MAP dictionary
+        MAP = {}
+        for a,b in zip(results['theta_labels'], map_parameters):
+            MAP[a] = b
+
+        zred = MAP['zred']
+        logmass = MAP['logmass']
+        dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
+        
+        """
+        dust_tesc – (default: 7.0) 
+            Stars younger than dust_tesc are attenuated by both dust1 and dust2, 
+                while stars older are attenuated by dust2 only. Units are log(yrs).
+        dust1 – (default: 0.0) 
+            Dust parameter describing the attenuation of young stellar light, 
+                i.e. where t <= dust_tesc (for details, see Conroy et al. 2009a).
+        dust2 – (default: 0.0) 
+            Dust parameter describing the attenuation of old stellar light, 
+            i.e. where t > dust_tesc (for details, see Conroy et al. 2009a).
+
+        Summary taken from https://dfm.io/python-fsps/current/stellarpop_api/#fsps.StellarPopulation.dust_mass
+        """ 
+        
+        # Reconstruct agebins used in the fits
+        tuniv = cosmo.age(zred).value
+        agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
+        agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
+        agebins = np.array([agelims[:-1], agelims[1:]]).T
+        nbins = len(agelims) - 1
+        
+        # Collect logsfr_ratios
+        logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
+        
+        # Convert to SFRs
+        sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
+        
+        # Convert log age bins to linear time (yr)
+        bin_edges = 10**agebins  # shape (nbins, 2)
+        
+        # Select bins younger than a certain timescale
+        t100 = 1e8  # 100 Myr in years
+        t30 = 3e7   #  30 Myr in years
+        
+        # Compute overlap of each bin with interval [0, tcut]
+        overlap100 = np.maximum(0.0, np.minimum(bin_edges[:,1], t100) - np.minimum(bin_edges[:,0], t100))
+        overlap30 = np.maximum(0.0, np.minimum(bin_edges[:,1], t30) - np.minimum(bin_edges[:,0], t30))
+        
+        # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
+        mass_in_last_100 = np.sum(sfrs * overlap100)
+        sfr_last100 = mass_in_last_100 / t100
+
+        mass_in_last_30 = np.sum(sfrs * overlap30)
+        sfr_last30 = mass_in_last_30 / t30
+        
+        print("Extracted galaxy properties...")
+        
+        ##########################################
+        #
+        # Section 2: Rebuilding the PROSPECTOR fit
+        #
+        ##########################################
+        
+        # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
+        sps = FastStepBasis(zcontinuous=1)
+
+        # Obtain best fit model spectrum and model photometry    
+        spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
+        
+        # Convert maggies to µJy
+        maggies_to_muJy = 3631e6
+        
+        # Wavelengths of the model spectrum
+        wave_spec = sps.wavelengths
+        
+        # Convert to arrays
+        phot = np.array(phot)
+        
+        # Draw 100 posterior samples
+        samples = posterior_samples(results, 100)
+        
+        sample_specs = []
+        for params_i in samples:
+            spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
+            sample_specs.append(spec_i)
+        sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
+        
+        # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
+        lower = np.percentile(sample_specs, 16, axis=0)
+        median = np.percentile(sample_specs, 50, axis=0)
+        upper = np.percentile(sample_specs, 84, axis=0)
+        
+        # Extend the obs dictionary with MIRI photometry for plotting
+        obs_miri = update_obs_with_miri(objid, obs, phot_table)
+        miri_filters = obs_miri['filters_miri']
+        
+        # Get predicted photometry for MIRI bands (+ Errors)
+        phot_miri = get_model_photometry(spec, wave_spec, miri_filters, zred)
+        phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
+        phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
+        phot_miri_err = 0.5*(phot_miri_upper - phot_miri_lower)
+        
+        # Compute filter wavelength in microns
+        phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
+        phot_wave_all = np.array([filt.wave_effective for filt in obs_miri['filters_all']])  # in Angstroms
+        phot_wave_miri = np.array([filt.wave_effective for filt in obs_miri['filters_miri']])  # in Angstroms
+        
+        print("Successfully reconstructed fit...")
+        
+        ##########################################
+        #
+        # Section 3: Calculating fit quality stats
+        #
+        ##########################################
+        
+        # Safer way to ensure you align with phot_miri
+        n_orig = len(obs['filters'])
+        miri_flux = obs_miri['maggies_all'][n_orig:] 
+        miri_err  = obs_miri['maggies_unc_all'][n_orig:]
+        
+        # Compute N_sigma
+        delta = miri_flux - phot_miri
+        tot_err = np.sqrt(phot_miri_err**2 + miri_err**2)
+        N_sigma = delta / tot_err
+        
+        # Compute it also in percentage of observed MIRI flux
+        perc = delta / miri_flux
+        
+        chi2_red = np.sum(N_sigma**2) / len(N_sigma)
+        
+        fit_quality = {}
+        fit_quality['chi2_red'] = chi2_red
+        
+        for i, filt in enumerate(obs_miri['filters_miri']):
+            
+            # Extracts 'F770W' from 'jwst_f770w'
+            name = filt.name.split('_')[-1].upper()
+            
+            fit_quality[name] = {
+                'galaxy_id': objid,
+                'zred': zred,
+                'obs_flux': miri_flux[i] * maggies_to_muJy,
+                'obs_err': miri_err[i] * maggies_to_muJy,
+                'mod_flux': phot_miri[i] * maggies_to_muJy,
+                'mod_err': phot_miri_err[i] * maggies_to_muJy,
+                'n_sigma': N_sigma[i],
+                'frac_diff': perc[i]
+            }
+            
+            rows.append(fit_quality[name])
+            
+        
+        print("Computed fit quality statistics")
+        
+        os.makedirs(stats_dir, exist_ok=True)
+        
+        filename = os.path.join(stats_dir, f"{objid}.pkl")
+        
+        data = {
+            # Important metadata
+            'id': objid,
+            'zred': zred,
+            'maggies_to_muJy': maggies_to_muJy,
+            
+            'model': {
+                'spec_best': spec,
+                'spec_16th': lower,
+                'spec_median': median,
+                'spec_84th': upper,
+                'wave_spec': wave_spec,
+                'sample_specs': sample_specs[:10],
+                'phot': phot,
+                'phot_wave': phot_wave,
+                'phot_miri': phot_miri,
+                'phot_miri_err': phot_miri_err,
+                'phot_wave_miri': phot_wave_miri
+            },
+            
+            # One entry for the observation dictionary
+            'obs': obs_miri,
+            
+            'fit_quality': fit_quality,
+            
+            'galaxy_properties': {
+                'logmass': logmass,
+                'dust2': dust2,
+                'sfr_100myr': sfr_last100,
+                'sfr_30myr': sfr_last30,
+                'sfr_bins': sfrs,
+                'agebins': agebins,
+                'map_theta': MAP # Keep the full raw dictionary just in case    
+            }
         }
-    
-    print("Computed fit quality statistics")
-    
-    os.makedirs(stats_dir, exist_ok=True)
-    
-    filename = os.path.join(stats_dir, f"{objid}.pkl")
-    
-    data = {
-        # Important metadata
-        'id': objid,
-        'zred': zred,
-        'maggies_to_muJy': maggies_to_muJy,
         
-        'model': {
-            'spec_best': spec,
-            'spec_16th': lower,
-            'spec_median': median,
-            'spec_84th': upper,
-            'wave_spec': wave_spec,
-            'sample_specs': sample_specs[:10],
-            'phot': phot,
-            'phot_wave': phot_wave,
-            'phot_miri': phot_miri,
-            'phot_miri_err': phot_miri_err,
-            'phot_wave_miri': phot_wave_miri
-        },
-        
-        # One entry for the observation dictionary
-        'obs': obs_miri,
-        
-        'fit_quality': fit_quality,
-        
-        'galaxy_properties': {
-            'logmass': logmass,
-            'dust2': dust2,
-            'sfr_100myr': sfr_last100,
-            'sfr_30myr': sfr_last30,
-            'sfr_bins': sfrs,
-            'agebins': agebins,
-            'map_theta': MAP # Keep the full raw dictionary just in case    
-        }
-    }
+        # Write output to a pickle file
+        with open(filename, 'wb') as f:
+            pkl.dump(data, f)
+        print(f"💾 Saved data to {filename}")
+            
+        if plot_dir:
+            plot_reconstructed_fit(filename, plot_dir)
     
-    # Write output to a pickle file
-    with open(filename, 'wb') as f:
-        pkl.dump(data, f)
-    print(f"💾 Saved data to {filename}")
-        
-    if plot_dir:
-        plot_reconstructed_fit(filename, plot_dir)
+    # 1. Convert the list of dictionaries to a DataFrame
+    df_results = pd.DataFrame(rows)
+
+    # 3. Save to CSV
+    output_path = '/Users/benjamincollins/University/Master/Red_Cardinal/prospector_v2/fit_quality/fit_quality.csv'
+    df_results.to_csv(output_path, index=False)
+
+    print(f"✅ Successfully saved {len(df_results)} rows to {output_path}")
     
-    return data
+    return 
+
+
+
+
 
 def plot_transmission_curves(ax, filters):
     """Plot the transmission curves of the given filters on the provided axis."""
@@ -449,7 +474,7 @@ def plot_reconstructed_fit(filename, plot_dir):
 
 
 
-def plot_quality_stats(pickle_dir, out_dir, bins=25):
+def plot_quality_stats(pickle_dir, out_dir, bins=25, plot_nsigmas=True, plot_logratios=True, plot_chi2red=True):
     """
     Create a histogram of the N_sigma values for all galaxies and for all bands as stored in the csv file.
     """
@@ -471,7 +496,7 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25):
         if 'chi2_red' in fit_quality:
             reduced_chi2_list.append({
                 'galaxy_id': gid,
-                'reduced_chi2': fit_quality['chi2_red'],
+                'reduced_chi2': fit_quality['chi2_red'][0],
                 'n_filters': len(fit_quality) - 1 # Assuming only 'chi2_red' is non-filter
             })
 
@@ -529,136 +554,137 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25):
     # Sort filter names by wavelength
     #filters_sorted = sorted(filters, key=lambda f: filter_wavelengths.get(f, np.inf))
     
-    # PLOT 1: N_SIGMA HISTOGRAMS
-    fig, axes = plt.subplots(2, 2, figsize=(10, 9), sharex=False, sharey=True)
-    axes = axes.flatten()  # easier to index
+    if plot_nsigmas:
+        # PLOT 1: N_SIGMA HISTOGRAMS
+        fig, axes = plt.subplots(2, 2, figsize=(10, 9), sharex=False, sharey=True)
+        axes = axes.flatten()  # easier to index
 
-    print("Initialised axes")
+        print("Initialised axes")
 
-    for i, (ax, band) in enumerate(zip(axes, bands)):
-        subset = df[df['filter_name'] == band]
-        nsigmas = subset['N_sigma']
-        if len(nsigmas) == 0: continue
-        
-        ax.set_title(f'{band}')
-        #ax.set_xlim(x_min, x_max)
-        ax.set_xlabel(r'$N_\sigma$')
-        ax.set_ylabel('Number of galaxies')
-        
-        #if i in [0,1]: ax.set_ylim(0, 24)
-        #elif i in [2,3]: ax.set_ylim(0,12)
+        for i, (ax, band) in enumerate(zip(axes, bands)):
+            subset = df[df['filter_name'] == band]
+            nsigmas = subset['N_sigma']
+            if len(nsigmas) == 0: continue
+            
+            ax.set_title(f'{band}')
+            #ax.set_xlim(x_min, x_max)
+            ax.set_xlabel(r'$N_\sigma$')
+            ax.set_ylabel('Number of galaxies')
+            
+            #if i in [0,1]: ax.set_ylim(0, 24)
+            #elif i in [2,3]: ax.set_ylim(0,12)
 
-        # Add compact statistics
-        mean_ratio = np.mean(nsigmas)
-        median_ratio = np.median(nsigmas)
-        std_ratio = np.std(nsigmas)
-        mad_ratio = median_abs_deviation(nsigmas)
-        N = len(subset['galaxy_id'].unique())
-        num = f'N = {N}'
-        
-        x_min = -8.5
-        x_max = 8.5
-        bins = np.linspace(x_min, x_max, 25)
-        
-        counts, bin_edges, _ = ax.hist(nsigmas, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
+            # Add compact statistics
+            mean_ratio = np.mean(nsigmas)
+            median_ratio = np.median(nsigmas)
+            std_ratio = np.std(nsigmas)
+            mad_ratio = median_abs_deviation(nsigmas)
+            N = len(subset['galaxy_id'].unique())
+            num = f'N = {N}'
+            
+            x_min = -8.5
+            x_max = 8.5
+            bins = np.linspace(x_min, x_max, 25)
+            
+            counts, bin_edges, _ = ax.hist(nsigmas, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
 
-        x = np.linspace(x_min, x_max, 500)
-        gaussian_norm = norm.pdf(x, loc=0, scale=1)
-        gaussian_obs = norm.pdf(x, loc=median_ratio, scale=mad_ratio)
+            x = np.linspace(x_min, x_max, 500)
+            gaussian_norm = norm.pdf(x, loc=0, scale=1)
+            gaussian_obs = norm.pdf(x, loc=median_ratio, scale=mad_ratio)
 
-        # Scale Gaussians to match histogram counts
-        gaussian_norm_scaled = gaussian_norm * len(nsigmas) * (bin_edges[1] - bin_edges[0])
-        gaussian_obs_scaled = gaussian_obs * len(nsigmas) * (bin_edges[1] - bin_edges[0])
+            # Scale Gaussians to match histogram counts
+            gaussian_norm_scaled = gaussian_norm * len(nsigmas) * (bin_edges[1] - bin_edges[0])
+            gaussian_obs_scaled = gaussian_obs * len(nsigmas) * (bin_edges[1] - bin_edges[0])
+            
+            ax.plot(x, gaussian_norm_scaled, 'gray', lw=2, alpha=1, label=r'$\mathcal{N}(0,1)$')
+            ax.plot(x, gaussian_obs_scaled, colors[i], lw=2, alpha=1, label=r'$\mathcal{N}'+f'({median_ratio:.2f},{mad_ratio:.2f})$')
+            
+            median_ratio = np.median(nsigmas)
+            
+            stats_text = f'Med={median_ratio:.2f}\nMAD={mad_ratio:.2f}\n{num}'
+            ax.legend()
+            ax.text(0.8, 0.84, stats_text, transform=ax.transAxes, fontsize=10,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+            
+            # Annotate in the top-right corner (adjust x,y if needed)
+            #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
+            #        transform=ax.transAxes, ha='right', va='top',
+            #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+            
+        #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        # Save single combined figure
+        filename = os.path.join(out_dir, 'Nsigma_gauss.png')
+        plt.savefig(filename, dpi=300)
+        plt.show()
         
-        ax.plot(x, gaussian_norm_scaled, 'gray', lw=2, alpha=1, label=r'$\mathcal{N}(0,1)$')
-        ax.plot(x, gaussian_obs_scaled, colors[i], lw=2, alpha=1, label=r'$\mathcal{N}'+f'({median_ratio:.2f},{mad_ratio:.2f})$')
-        
-        median_ratio = np.median(nsigmas)
-        
-        stats_text = f'Med={median_ratio:.2f}\nMAD={mad_ratio:.2f}\n{num}'
-        ax.legend()
-        ax.text(0.8, 0.84, stats_text, transform=ax.transAxes, fontsize=10,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-        
-        # Annotate in the top-right corner (adjust x,y if needed)
-        #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
-        #        transform=ax.transAxes, ha='right', va='top',
-        #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-        
-    #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_gauss.png')
-    plt.savefig(filename, dpi=300)
-    plt.show()
     
     
-    
-    
-    # PLOT 2: LOG RATIOS
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=True)
-    axes = axes.flatten()  # easier to index
+    if plot_logratios:
+        # PLOT 2: LOG RATIOS
+        fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=True)
+        axes = axes.flatten()  # easier to index
 
-    for i, (ax, band) in enumerate(zip(axes, bands)):
-        subset = df[df['filter_name'] == band]
-        
-        f_obs = subset['flux']
-        err = subset['flux_err']
-        frac_diff = subset['frac_diff']
-        
-        # SNR filter: Keep only detections > 3-sigma
-        snr_mask = (f_obs / err) >= 3.0
-        
-        # Model reconstruction
-        # Using the simplified: f_model = f_obs * (1 - frac_diff)
-        # We filter out frac_diff >= 1 to avoid log(0) or log(negative)
-        valid_mask = (frac_diff < 1.0) & snr_mask
-        
-        # Calculate ratios only for valid entries
-        # log10(f_obs / (f_obs * (1-frac_diff))) reduces to -log10(1-frac_diff)
-        log_ratios = -np.log10(1.0 - frac_diff[valid_mask])
-        
-        ax.set_title(f'{bands[i]}')
-        #ax.set_xlim(x_min, x_max)
-        ax.set_xlabel('Flux ratio (dex)')
-        ax.set_ylabel('Number of galaxies')
-        
-        #if i in [0,1]: ax.set_ylim(0, 24)
-        #elif i in [2,3]: ax.set_ylim(0,12)
-        
-        # Add compact statistics
-        mean_logr = np.mean(log_ratios)
-        std_logr = np.std(log_ratios)
-        median_logr = np.median(log_ratios)
-        mad_logr = median_abs_deviation(log_ratios)
-        N = len(log_ratios)
-        num = f'N = {N}'
-        
-        x_min = -1.2
-        x_max = 1.2
-        bins = np.linspace(x_min, x_max, 25)
-        
-        ax.hist(log_ratios, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
-        stats_text = f'Med={median_logr:.2f}\nMAD={mad_logr:.2f}\n{num}'
-        if i == 2: 
-            stats_text += ' (*)'
-            print(log_ratios[log_ratios > 1])
-        ax.text(0.025, 0.82, stats_text, transform=ax.transAxes, fontsize=10,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-        #ax.set_ylim(0, N//2+1)
-        # Annotate in the top-right corner (adjust x,y if needed)
-        #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
-        #        transform=ax.transAxes, ha='right', va='top',
-        #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-        
-    #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # Save single combined figure
-    filename = os.path.join(out_dir, 'log_ratios.png')
-    plt.savefig(filename, dpi=300)
-    plt.show()
+        for i, (ax, band) in enumerate(zip(axes, bands)):
+            subset = df[df['filter_name'] == band]
+            
+            f_obs = subset['flux']
+            err = subset['flux_err']
+            frac_diff = subset['frac_diff']
+            
+            # SNR filter: Keep only detections > 3-sigma
+            snr_mask = (f_obs / err) >= 3.0
+            
+            # Model reconstruction
+            # Using the simplified: f_model = f_obs * (1 - frac_diff)
+            # We filter out frac_diff >= 1 to avoid log(0) or log(negative)
+            valid_mask = (frac_diff < 1.0) & snr_mask
+            
+            # Calculate ratios only for valid entries
+            # log10(f_obs / (f_obs * (1-frac_diff))) reduces to -log10(1-frac_diff)
+            log_ratios = -np.log10(1.0 - frac_diff[valid_mask])
+            
+            ax.set_title(f'{bands[i]}')
+            #ax.set_xlim(x_min, x_max)
+            ax.set_xlabel('Flux ratio (dex)')
+            ax.set_ylabel('Number of galaxies')
+            
+            #if i in [0,1]: ax.set_ylim(0, 24)
+            #elif i in [2,3]: ax.set_ylim(0,12)
+            
+            # Add compact statistics
+            mean_logr = np.mean(log_ratios)
+            std_logr = np.std(log_ratios)
+            median_logr = np.median(log_ratios)
+            mad_logr = median_abs_deviation(log_ratios)
+            N = len(log_ratios)
+            num = f'N = {N}'
+            
+            x_min = -1.2
+            x_max = 1.2
+            bins = np.linspace(x_min, x_max, 25)
+            
+            ax.hist(log_ratios, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
+            stats_text = f'Med={median_logr:.2f}\nMAD={mad_logr:.2f}\n{num}'
+#            if i == 2: 
+ #               stats_text += ' (*)'
+  #              print(log_ratios[log_ratios > 1])
+            ax.text(0.025, 0.82, stats_text, transform=ax.transAxes, fontsize=10,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+            #ax.set_ylim(0, N//2+1)
+            # Annotate in the top-right corner (adjust x,y if needed)
+            #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
+            #        transform=ax.transAxes, ha='right', va='top',
+            #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
+            
+        #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        # Save single combined figure
+        filename = os.path.join(out_dir, 'log_ratios.png')
+        plt.savefig(filename, dpi=300)
+        plt.show()
     
-    return
+
     """
     # Plot histograms for galaxies    
     galaxies = df['galaxy_id'].unique()
@@ -687,94 +713,82 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25):
 
     """
 
-    # Compute reduced chi^2 per galaxy
-    
+    if plot_chi2red:
+        
+        # Compute reduced chi^2 per galaxy
+        
+        chi2_red = chi2_df['reduced_chi2']
+        
+        # --- 1. Clipping & Statistics ---
+        chi2_red = chi2_df['reduced_chi2']
+        q95 = chi2_red.quantile(0.95)
+        filtered = chi2_df[chi2_red <= q95]
+        
+        mean_val = chi2_red.mean()
+        median_val = chi2_red.median()
+        mad_val = median_abs_deviation(chi2_red.dropna())
 
-    for gal in df['galaxy_id'].unique():
-        subset = df[df['galaxy_id'] == gal]
-        n_filters = len(subset)
-        if n_filters > 0:
-            chi2 = np.sum(subset['N_sigma']**2) / n_filters           
-            reduced_chi2.append({'galaxy_id': gal, 'reduced_chi2': chi2})
+        fig, axes = plt.subplots(1, 2, figsize=(9, 4), gridspec_kw={"width_ratios":[1.25,0.75]})
+        
+        # --- Left: Nsigma vs sSFR
+        counts, bins, patches = axes[0].hist(filtered['reduced_chi2'], bins=25, alpha=0.7, edgecolor='black', range=(0, q95))
+        
+        axes[0].set_xlabel(r'Reduced $\chi^2$')
+        axes[0].set_ylabel('Number of galaxies')
+        
+        # Count how many chi2 values are in the histogram
+        chi2_values = len(chi2_df)
+        num = f'\nN = {len(filtered)}/{chi2_values}\n(95th perctile)'
+        # Annotate in the top-right corner (adjust x,y if needed)
+        
+        #stats_text = f'{num}'
+        #axes[0].text(-0.335, 0.75, stats_text, transform=ax.transAxes, fontsize=10,
+        #        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        
+        #plt.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
+        #            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        # plot vertical lines for mean and median
+        # Plot vertical lines for mean and median
+        ymax = counts.max() * 1.1
+        axes[0].vlines(mean_val, ymin=0, ymax=ymax, color='red', alpha=0.8, linestyle='--', linewidth=2, label=f'Mean: {mean_val:.2f}')
+        axes[0].vlines(median_val, ymin=0, ymax=ymax, color='darkred', alpha=0.8, linestyle='-', linewidth=2, label=f'Median: {median_val:.2f}')
+        axes[0].plot([],[], label=num, alpha=0)  # dummy plot for legend
+        axes[0].set_ylim(0, ymax)
+        axes[0].legend()    
+        
+        
+        chi2_df['n_filters'] = chi2_df['galaxy_id'].apply(
+        lambda g: len(df[df['galaxy_id'] == g])
+        )
 
-    chi2_df = pd.DataFrame(reduced_chi2)
-    
-    # Clip the highest 5% for visual clarity
-    chi2_clip = chi2_df['reduced_chi2'].quantile(0.95)
-    clipped = chi2_df[chi2_df['reduced_chi2'] <= chi2_clip]
-    excluded = len(chi2_df) - len(clipped)
+        
+        print(len(chi2_df))
+        print(len(filtered))
 
-    fig, axes = plt.subplots(1, 2, figsize=(9, 4), gridspec_kw={"width_ratios":[1.25,0.75]})
-    
-    # --- Left: Nsigma vs sSFR
-    counts, bins, patches = axes[0].hist(clipped['reduced_chi2'], bins=25, alpha=0.7, edgecolor='black', range=(0, chi2_clip))
-    
-    axes[0].set_xlabel(r'Reduced $\chi^2$')
-    axes[0].set_ylabel('Number of galaxies')
-    
-    # Count how many chi2 values are in the histogram
-    chi2_values = len(chi2_df)
-    num = f'\nN = {len(clipped)}/{chi2_values}\n(95th perctile)'
-    # Annotate in the top-right corner (adjust x,y if needed)
-    
-    mean_chi2 = np.mean(chi2_df['reduced_chi2'])
-    std_chi2 = np.std(chi2_df['reduced_chi2'])
-    median_chi2 = np.median(chi2_df['reduced_chi2'])
-    
-    #stats_text = f'{num}'
-    #axes[0].text(-0.335, 0.75, stats_text, transform=ax.transAxes, fontsize=10,
-    #        bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-    
-    
-    #plt.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
-    #            bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-    
-    # plot vertical lines for mean and median
-    # Plot vertical lines for mean and median
-    ymax = counts.max() * 1.1
-    axes[0].vlines(mean_chi2, ymin=0, ymax=ymax, color='red', alpha=0.8, linestyle='--', linewidth=2, label=f'Mean: {mean_chi2:.2f}')
-    axes[0].vlines(median_chi2, ymin=0, ymax=ymax, color='darkred', alpha=0.8, linestyle='-', linewidth=2, label=f'Median: {median_chi2:.2f}')
-    axes[0].plot([],[], label=num, alpha=0)  # dummy plot for legend
-    axes[0].set_ylim(0, 20)
-    axes[0].legend()    
-    
-    
-    chi2_df['n_filters'] = chi2_df['galaxy_id'].apply(
-    lambda g: len(df[df['galaxy_id'] == g])
-    )
+        # Scatter plot with filtered data
+        #plt.scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
+        axes[1].scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
+        axes[1].set_xlabel('Number of photometric data points')
+        axes[1].set_ylabel(r'Reduced $\chi^2$')
+        #plt.title(r'Reduced $\chi^2$ vs. number of MIRI bands')
+        axes[1].axhline(1, color='orange', linestyle='--', label='Unity')
+        axes[1].legend()    
+        
+        plt.tight_layout()
+        filename = os.path.join(out_dir, 'reduced_chi2.png')
+        plt.savefig(filename, dpi=300)
+        print(f"✅ Saved reduced chi^2 plots to {filename}")
+        plt.show()
+        
+        threshold = 30  # user-specified value
+        high_chi2_ids = chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'galaxy_id'].tolist()
+        print(f"{len(high_chi2_ids)} galaxies have reduced χ² > {threshold}")
+        print("These galaxies are:", high_chi2_ids)
+        print("Their χ² values are:", chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'reduced_chi2'].tolist())
 
-    # Compute 95th percentile of reduced chi^2
-    q95 = chi2_df['reduced_chi2'].quantile(0.95)
-
-    # Filter out galaxies above this threshold
-    filtered = chi2_df[chi2_df['reduced_chi2'] <= q95]
-    
-    print(len(chi2_df))
-    print(len(filtered))
-
-    # Scatter plot with filtered data
-    #plt.scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
-    axes[1].scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
-    axes[1].set_xlabel('Number of photometric data points')
-    axes[1].set_ylabel(r'Reduced $\chi^2$')
-    #plt.title(r'Reduced $\chi^2$ vs. number of MIRI bands')
-    axes[1].axhline(1, color='orange', linestyle='--', label='Unity')
-    axes[1].legend()    
-    
-    plt.tight_layout()
-    filename = os.path.join(out_dir, 'reduced_chi2.png')
-    plt.savefig(filename, dpi=300)
-    print(f"✅ Saved reduced chi^2 plots to {filename}")
-    plt.show()
-    
-    threshold = 30  # user-specified value
-    high_chi2_ids = chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'galaxy_id'].tolist()
-    print(f"{len(high_chi2_ids)} galaxies have reduced χ² > {threshold}")
-    print("These galaxies are:", high_chi2_ids)
-    print("Their χ² values are:", chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'reduced_chi2'].tolist())
-    
-    for id in high_chi2_ids:
-        load_and_display(id)
+    return 
     
     """
     # Compute average fractional discrepancy per galaxy
