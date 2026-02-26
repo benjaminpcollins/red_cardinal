@@ -530,6 +530,125 @@ def get_color_scheme(scheme_name='viridis'):
     }
     return schemes.get(scheme_name, schemes['viridis'])
 
+
+
+def plot_main_sequence_from_pickles(pickle_dir, zred_ms, ms_type='Leja', out_dir='/Users/benjamincollins/University/Master/Red_Cardinal/prospector_v2/sample_plots/'):
+    """
+    Reads pickle files and plots the star-forming main sequence.
+    """
+    
+    pickle_files = glob.glob(f'{pickle_dir}/*.pkl')
+    
+    # Lists to store extracted data
+    masses = []
+    sfrs = []
+    ids = []
+    fit_qual = []
+    
+    # 1. Extraction Loop
+    for f_path in pickle_files:
+        with open(f_path, 'rb') as f:
+            data = pkl.load(f)
+        
+        props = data['galaxy_properties']
+        ids.append(data['id'])
+        masses.append(10**props['logmass'])
+        sfrs.append(props['sfr_100myr'])
+        fit_qual.append(data['fit_quality'])
+
+    # Convert to arrays
+    logM = np.log10(masses)
+    logSFR_sample = np.log10(sfrs)
+    logM_grid = np.linspace(np.min(logM)-0.5, np.max(logM)+0.5, 200)
+
+    # 2. Main Sequence Calculations
+    t = cosmo.age(zred_ms).to(u.Gyr).value
+
+    if ms_type == 'Leja':        
+        a = -0.06707 + 0.3684 * zred_ms - 0.1047 * zred_ms**2
+        b = 0.8552 - 0.1010 * zred_ms - 0.001816 * zred_ms*2
+        c = 0.2148 + 0.8137 * zred_ms - 0.08052 * zred_ms**2
+        log_Mt = 10.29 - 0.1284 * zred_ms + 0.1203 * zred_ms**2
+        logSFR_MS = np.where(logM_grid > log_Mt, a*(logM_grid-log_Mt)+c, b*(logM_grid-log_Mt)+c)
+
+    elif ms_type == 'Speagle':
+        # Speagle+14 coefficients
+        slope = 0.84 - 0.026 * t
+        intercept = -(6.51 - 0.11 * t)
+
+        # 1-sigma errors
+        slope_err = 0.02 + 0.003 * t
+        intercept_err = 0.24 + 0.03 * t
+
+        # Main sequence
+        logSFR_MS = slope * logM_grid + intercept
+        logSFR_high = (slope + slope_err) * logM_grid + (intercept + intercept_err)
+        logSFR_low  = (slope - slope_err) * logM_grid + (intercept - intercept_err)
+
+    else:
+        print("⚠️ Error: ms_type needs to be either 'Leja' or 'Speagle'. Aborting.")   
+        return 
+
+    # 3. Plotting Logic
+    fig, ax = plt.subplots(figsize=(7, 4))
+    cmap = plt.get_cmap('YlOrBr')
+    # Colourise by detection fraction!
+    n_obs = []
+    n_det = []
+    for key, fq in fit_qual.values():
+        # Count filters (keys like 'F770W') excluding global stats like 'chi2_red'
+        count = sum(1 for k, v in fq.items() if isinstance(v, dict))
+        n_obs.append(count)
+        
+        # Count only filters where SNR > 3
+        count = sum(1 for k, v in fq.items() 
+                    if isinstance(v, dict) and 
+                    v.get('snr', 0) > 3.0)
+        n_det.append(count)
+    
+    N_detected = np.array(n_det)
+    N_available = np.array(n_obs)
+    f_det = N_detected / N_available  # fraction 0-1  
+    
+    # Scatter plot
+    sc = ax.scatter(logM, logSFR_sample, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
+    
+    # Colorbar
+    cbar = plt.colorbar(sc, ax=ax)
+    cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
+    cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
+    cbar.set_label('Number of MIRI detections (relative)')
+        
+    if ms_type == 'Leja':
+        # MS line
+        ax.plot(logM_grid, logSFR_MS, 'k--', color='black', alpha=0.7, label=f'Leja+22 MS (z={zred_ms:.2f})', linewidth=2)
+        ax.plot(logM_grid, logSFR_MS - 1.0, 'k:', alpha=0.7, label='1 dex below MS')
+        filename = 'mein_sequence_leja.png'
+        #ax.plot(10.720281148198858, 0.5723139475044815, color='red', alpha=0.2)
+    elif ms_type == 'Speagle':
+        # MS line and shaded 1-sigma region
+        ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
+        ax.fill_between(logM_grid, logSFR_low, logSFR_high, color='gray', alpha=0.15, label='1σ uncertainty')
+        filename = 'main_sequence_speagle.png'
+        
+    # Labels and legend
+    ax.set_xlabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
+    ax.set_ylabel(r'$\log_{10}(\mathrm{SFR} / $M$_\odot\,\mathrm{yr}^{-1})$', fontsize=14)
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    os.makedirs(out_dir, exist_ok=True)
+    save_path = os.path.join(out_dir, filename)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.show()
+    print(f"Plot saved as {save_path}")
+        
+
+        
+        
+        
 def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='Speagle', color_scheme='viridis', gradient='absolute', save_path='main_sequence.png'):
     """
     Plot the star-forming main sequence
