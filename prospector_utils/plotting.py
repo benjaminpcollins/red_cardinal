@@ -226,7 +226,7 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25, plot_nsigmas=True, plot_log
         if 'chi2_red' in fit_quality:
             reduced_chi2_list.append({
                 'galaxy_id': gid,
-                'reduced_chi2': fit_quality['chi2_red'][0],
+                'reduced_chi2': fit_quality['chi2_red'],
                 'n_filters': len(fit_quality) - 1 # Assuming only 'chi2_red' is non-filter
             })
 
@@ -237,8 +237,8 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25, plot_nsigmas=True, plot_log
                     'galaxy_id': gid,
                     'filter_name': key,
                     'N_sigma': val.get('n_sigma'),
-                    'flux': val.get('flux'),
-                    'flux_err': val.get('flux_err'),
+                    'flux': val.get('obs_flux'),
+                    'flux_err': val.get('obs_err'),
                     'frac_diff': val.get('frac_diff')
                 })
 
@@ -247,36 +247,8 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25, plot_nsigmas=True, plot_log
     
     print("Extracted data!")
     
-    """    
-    fit_quality['chi2_red'] = chi2_red,
-    
-    for i, filt in enumerate(obs_miri['filters_miri']):
-        
-        # Extracts 'F770W' from 'jwst_f770w'
-        name = filt.name.split('_')[-1].upper()
-        
-        fit_quality[name] = {
-            'n_sigma': N_sigma[i],
-            'frac_diff' : perc[i],
-            'flux': miri_flux[i] * maggies_to_muJy,
-            'flux_err': miri_err[i] * maggies_to_muJy
-        }
-    """
-        
     # Create output folder
     os.makedirs(out_dir, exist_ok=True)
-
-    # Compute global x-axis limits (clip outliers if needed)
-    #x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
-
-    # Example: sort filters by central wavelength
-    # (replace this mapping with your actual filters & λ)
-    filter_wavelengths = {
-        'jwst_f770w': 7.7,
-        'jwst_f1000w': 10.0,
-        'jwst_f1800w': 18.0,
-        'jwst_f2100w': 21.0,
-    }
 
     bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
     colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']  # Distinct colors per band
@@ -352,7 +324,7 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25, plot_nsigmas=True, plot_log
     
     if plot_logratios:
         # PLOT 2: LOG RATIOS
-        fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=True)
+        fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=False)
         axes = axes.flatten()  # easier to index
 
         for i, (ax, band) in enumerate(zip(axes, bands)):
@@ -396,8 +368,9 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25, plot_nsigmas=True, plot_log
             
             counts, _, _ = ax.hist(log_ratios, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
 
-            ymax = 25 # for all plots
-            ax.set_ylim(0,25)
+            ymax = np.max(counts) * 1.1 # for all plots
+            ymax = max(ymax, 10)
+            ax.set_ylim(0,ymax)
             ax.vlines(median_logr, ymin=0, ymax=ymax, color='darkred', alpha=0.8, linestyle='-', linewidth=2, label=f'Median: {median_logr:.2f}')
 #            if i == 2: 
  #               stats_text += ' (*)'
@@ -466,11 +439,11 @@ def plot_quality_stats(pickle_dir, out_dir, bins=25, plot_nsigmas=True, plot_log
         plt.tight_layout()
         filename = os.path.join(out_dir, 'reduced_chi2.png')
         plt.savefig(filename, dpi=300)
-        print(f"✅ Saved reduced chi^2 plots to {filename}")
         plt.show()
         
         threshold = 30  # user-specified value
         high_chi2_ids = chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'galaxy_id'].tolist()
+        print(f"✅ Saved reduced chi^2 plots to {filename}")
         print(f"{len(high_chi2_ids)} galaxies have reduced χ² > {threshold}")
         print("These galaxies are:", high_chi2_ids)
         print("Their χ² values are:", chi2_df.loc[chi2_df['reduced_chi2'] > threshold, 'reduced_chi2'].tolist())
@@ -532,17 +505,20 @@ def get_color_scheme(scheme_name='viridis'):
 
 
 
-def plot_main_sequence_from_pickles(pickle_dir, zred_ms, ms_type='Leja', out_dir='/Users/benjamincollins/University/Master/Red_Cardinal/prospector_v2/sample_plots/'):
+def plot_ms_from_pickles(pickle_dir, ms_type='Leja', filename=None, out_dir='/Users/benjamincollins/University/Master/Red_Cardinal/prospector/sample_plots/'):
     """
     Reads pickle files and plots the star-forming main sequence.
     """
     
     pickle_files = glob.glob(f'{pickle_dir}/*.pkl')
     
+    quiescent = [7549, 8013, 8469, 9395, 10128, 10339, 10400, 10565, 10592, 11142, 11494, 16419, 18668, 21477, 12332]
+    
     # Lists to store extracted data
     masses = []
     sfrs = []
     ids = []
+    zreds = []
     fit_qual = []
     
     # 1. Extraction Loop
@@ -550,12 +526,21 @@ def plot_main_sequence_from_pickles(pickle_dir, zred_ms, ms_type='Leja', out_dir
         with open(f_path, 'rb') as f:
             data = pkl.load(f)
         
+        #if data['id'] in quiescent:
+        #    continue
+        
         props = data['galaxy_properties']
         ids.append(data['id'])
+        zreds.append(data['zred'])
         masses.append(10**props['logmass'])
+        #if props['logmass'] < 9.0:
+        #    print(data['id'])
+        
         sfrs.append(props['sfr_100myr'])
         fit_qual.append(data['fit_quality'])
 
+    zred_ms = np.median(zreds)
+    
     # Convert to arrays
     logM = np.log10(masses)
     logSFR_sample = np.log10(sfrs)
@@ -595,7 +580,8 @@ def plot_main_sequence_from_pickles(pickle_dir, zred_ms, ms_type='Leja', out_dir
     # Colourise by detection fraction!
     n_obs = []
     n_det = []
-    for key, fq in fit_qual.values():
+    
+    for fq in fit_qual:
         # Count filters (keys like 'F770W') excluding global stats like 'chi2_red'
         count = sum(1 for k, v in fq.items() if isinstance(v, dict))
         n_obs.append(count)
@@ -613,23 +599,25 @@ def plot_main_sequence_from_pickles(pickle_dir, zred_ms, ms_type='Leja', out_dir
     # Scatter plot
     sc = ax.scatter(logM, logSFR_sample, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
     
-    # Colorbar
+    # Colourbar
     cbar = plt.colorbar(sc, ax=ax)
     cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
     cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
-    cbar.set_label('Number of MIRI detections (relative)')
+    cbar.set_label('MIRI Detection Fraction')
         
     if ms_type == 'Leja':
         # MS line
         ax.plot(logM_grid, logSFR_MS, 'k--', color='black', alpha=0.7, label=f'Leja+22 MS (z={zred_ms:.2f})', linewidth=2)
         ax.plot(logM_grid, logSFR_MS - 1.0, 'k:', alpha=0.7, label='1 dex below MS')
-        filename = 'mein_sequence_leja.png'
+        if not filename:
+            filename = 'ms_leja.png'
         #ax.plot(10.720281148198858, 0.5723139475044815, color='red', alpha=0.2)
     elif ms_type == 'Speagle':
         # MS line and shaded 1-sigma region
         ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
         ax.fill_between(logM_grid, logSFR_low, logSFR_high, color='gray', alpha=0.15, label='1σ uncertainty')
-        filename = 'main_sequence_speagle.png'
+        if not filename:
+            filename = 'ms_speagle.png'
         
     # Labels and legend
     ax.set_xlabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
@@ -645,6 +633,170 @@ def plot_main_sequence_from_pickles(pickle_dir, zred_ms, ms_type='Leja', out_dir
     plt.show()
     print(f"Plot saved as {save_path}")
         
+
+
+
+
+
+def plot_sample_from_pickles(pickle_dir, out_dir='/Users/benjamincollins/University/Master/Red_Cardinal/prospector/sample_plots/'):
+    """
+    Plot z-M parameter space colour-coded by nsigma.
+    """
+    
+    pickle_files = glob.glob(f'{pickle_dir}/*.pkl')
+    
+    # Color schemes based on band
+    cmaps = {'F770W': 'Blues', 'F1000W': 'Greens', 'F1800W': 'Oranges', 'F2100W': 'Reds'}
+    
+    # Lists to store extracted data
+    logmasses = []
+    zreds = []
+    ids = []
+    fit_qual = []
+    
+    # 1. Extraction Loop
+    for f_path in pickle_files:
+        with open(f_path, 'rb') as f:
+            data = pkl.load(f)
+        
+        props = data['galaxy_properties']
+        ids.append(data['id'])
+        logmasses.append(props['logmass'])
+        zreds.append(data['zred'])
+        fit_qual.append(data['fit_quality'])
+    
+    # Convert to numpy arrays for masking
+    zreds = np.array(zreds)
+    logmasses = np.array(logmasses)
+    
+    os.makedirs(out_dir, exist_ok=True)        
+    
+    for band in cmaps.keys():
+        fig, ax = plt.subplots(figsize=(6, 4))
+        
+        flux_array = []
+        mask = []
+        
+        for fq in fit_qual:
+            if band in fq:
+                snr = fq[band]['snr']                
+                if snr > 3.0:
+                    # We use obs_flux from your new fit_quality dict
+                    flux_array.append(fq[band]['obs_flux'])
+                    mask.append(True)
+                else:
+                    mask.append(False)
+            else:
+                mask.append(False)
+                
+        mask = np.array(mask)
+              
+        # Apply mask to all plotting arrays
+        plot_z = zreds[mask]
+        plot_m = logmasses[mask]
+        # Convert flux to log10(muJy) - assuming it's already muJy from your pickle loop
+        plot_color = np.log10(np.array(flux_array)*1e6)
+        
+        color_scheme = cmaps.get(band, 'viridis')
+        
+        sc = ax.scatter(plot_z, plot_m, c=plot_color, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf'$\log_{{10}}(Flux) [\mu Jy]$', fontsize=14)
+        
+        filename = f'zM_flux_{band}.png'
+        
+        stats_text = f'N = {len(plot_z)}'
+        ax.text(0.83, 0.92, stats_text, transform=ax.transAxes, fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        save_path = os.path.join(out_dir, filename)
+        ax.set_title(f'{band}', fontsize=14)
+        ax.set_xlim(1.25, 3.75)
+        ax.set_ylim(8.5, 12.5)
+        
+        ax.set_xlabel('Redshift (z)', fontsize=16)
+        ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=16)
+        ax.xaxis.set_tick_params(labelsize=16)
+        ax.yaxis.set_tick_params(labelsize=16)
+        ax.set_yticklabels(ax.get_yticks(), fontsize=12)
+        ax.grid(True, alpha=0.3)
+            
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        print(f"Saved figure to {save_path}")
+
+        
+        
+    
+        fig, ax = plt.subplots(figsize=(6, 4))
+        nsig_array = []
+        mask = []
+        
+        for fq in fit_qual:
+            if band in fq:
+                nsig_array.append(fq[band]['n_sigma'])
+                mask.append(True)
+            else:
+                mask.append(False)
+                
+        mask = np.array(mask)
+        plot_z = zreds[mask]
+        plot_m = logmasses[mask]
+        plot_color = np.array(nsig_array)
+        
+        # Use a diverging colormap for residuals (Red-Blue)
+        sc = ax.scatter(plot_z, plot_m, c=plot_color, cmap='seismic', s=60, 
+                        alpha=0.8, edgecolor='black', vmin=-6, vmax=6)
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf'$N_\sigma$', fontsize=14)
+        
+        filename = f'zM_nsigma_{band}.png'
+            
+        stats_text = f'N = {len(plot_z)}'
+        ax.text(0.83, 0.92, stats_text, transform=ax.transAxes, fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        save_path = os.path.join(out_dir, filename)
+        ax.set_title(f'{band}', fontsize=14)
+        ax.set_xlim(1.25, 3.75)
+        ax.set_ylim(8.5, 12.5)
+        
+        ax.set_xlabel('Redshift (z)', fontsize=16)
+        ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=16)
+        ax.xaxis.set_tick_params(labelsize=12)
+        ax.yaxis.set_tick_params(labelsize=12)
+        ax.set_yticklabels(ax.get_yticks(), fontsize=12)
+        ax.grid(True, alpha=0.3)
+            
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        print(f"Saved figure to {save_path}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
         
         
