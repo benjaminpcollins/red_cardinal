@@ -775,58 +775,84 @@ def plot_sample_from_pickles(pickle_dir, out_dir='/Users/benjamincollins/Univers
         print(f"Saved figure to {save_path}")
 
 
-def plot_nsigma_vs_params(nsig1, nsig2, log_ssfr, dust, save_path=None):
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+def plot_nsigma_vs_params(pickle_dir, out_dir='/Users/benjamincollins/University/Master/Red_Cardinal/prospector/sample_plots/'):
+    """
+    Plots N_sigma residuals against physical parameters (sSFR and Dust)
+    for MIRI filters F1800W and F2100W.
+    """
+    pickle_files = glob.glob(os.path.join(pickle_dir, '*.pkl'))
     
-    axes = axes.flatten()
-    # --- Left: Nsigma vs sSFR
-    sc1 = axes[0].scatter(log_ssfr, nsig1, c=dust, cmap="viridis", alpha=0.7, edgecolor='black')
-    axes[0].axhline(0, ls="--", c="grey")
-    axes[0].set_xlabel(r'$\log(\mathrm{sSFR}_{100}\,[\mathrm{yr}^{-1}])$')
-    axes[0].set_ylabel(r'$N_\sigma$')
-    axes[0].set_title(f'F1800W: ' + r'$\mathrm{N_\sigma}$ vs sSFR')
-    axes[0].set_xlim(-9.75, -7.75)
-    cb1 = fig.colorbar(sc1, ax=axes[0])
-    cb1.set_label("Dust attenuation (dust2)")
-    
-    # --- Right: Nsigma vs Dust
-    sc2 = axes[1].scatter(dust, nsig1, c=log_ssfr, cmap="plasma", alpha=0.7, edgecolor='black')
-    axes[1].axhline(0, ls="--", c="grey")
-    axes[1].set_xlabel(r'Dust attenuation $A_V$')
-    axes[1].set_ylabel(r'$N_\sigma$')
-    axes[1].set_title(f'F1800W: ' + r'$\mathrm{N_\sigma}$ vs $\mathrm{A_V}$')
-    axes[1].set_xlim(-0.1, 3)
-    cb2 = fig.colorbar(sc2, ax=axes[1])
-    cb2.set_label(r'$\log(\mathrm{sSFR}_{100})$')
-    
-    # --- Left: Nsigma vs sSFR
-    sc3 = axes[2].scatter(log_ssfr, nsig2, c=dust, cmap="viridis", alpha=0.7, edgecolor='black')
-    axes[2].axhline(0, ls="--", c="grey")
-    axes[2].set_xlabel(r'$\log(\mathrm{sSFR}_{100}\,[\mathrm{yr}^{-1}])$')
-    axes[2].set_ylabel(r'$N_\sigma$')
-    axes[2].set_title(f'F2100W: ' + r'$\mathrm{N_\sigma}$ vs sSFR')
-    axes[2].set_xlim(-9.75, -7.75)
-    cb1 = fig.colorbar(sc1, ax=axes[2])
-    cb1.set_label("Dust attenuation (dust2)")
-    
-    # --- Right: Nsigma vs Dust
-    sc4 = axes[3].scatter(dust, nsig2, c=log_ssfr, cmap="plasma", alpha=0.7, edgecolor='black')
-    axes[3].axhline(0, ls="--", c="grey")
-    axes[3].set_xlabel(r'Dust attenuation $A_V$')
-    axes[3].set_ylabel(r'$N_\sigma$')
-    axes[3].set_title(f'F2100W: ' + r'$\mathrm{N_\sigma}$ vs $\mathrm{A_V}$')
-    axes[3].set_xlim(-0.1, 3)
-    cb2 = fig.colorbar(sc2, ax=axes[3])
-    cb2.set_label(r'$\log(\mathrm{sSFR}_{100})$')
-    
-    for ax in axes:
-        ax.set_ylim(-6,6)
-    
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
+    # Storage for galaxies that have the required data
+    data_list = []
 
+    # 1. Extraction with alignment check
+    for f_path in pickle_files:
+        with open(f_path, 'rb') as f:
+            data = pkl.load(f)
+        
+        fq = data['fit_quality']
+        props = data['galaxy_properties']
+        
+        # We only want to plot galaxies that have data in both filters for comparison
+        if 'F1800W' in fq and 'F2100W' in fq:
+            data_list.append({
+                'nsig_1800': fq['F1800W']['n_sigma'],
+                'nsig_2100': fq['F2100W']['n_sigma'],
+                'log_ssfr': np.log10(props['sfr_100myr'] / 10**props['logmass']),
+                'dust': props['dust2']
+            })
+
+
+
+    if not data_list:
+        print("No galaxies found with both F1800W and F2100W detections.")
+        return
+
+    # Convert to arrays for easy plotting
+    nsig1 = np.array([d['nsig_1800'] for d in data_list])
+    nsig2 = np.array([d['nsig_2100'] for d in data_list])
+    log_ssfr = np.array([d['log_ssfr'] for d in data_list])
+    dust = np.array([d['dust'] for d in data_list])
+
+    # Filter labels for titles
+    bands = ['F1800W', 'F1800W', 'F2100W', 'F2100W']
+    y_data = [nsig1, nsig1, nsig2, nsig2]
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+    
+    for i, ax in enumerate(axes):
+        # Even indices (0, 2) plot vs sSFR, Odd (1, 3) plot vs Dust
+        if i % 2 == 0:
+            sc = ax.scatter(log_ssfr, y_data[i], c=dust, cmap="viridis", 
+                            alpha=0.7, edgecolor='black', s=50)
+            ax.set_xlabel(r'$\log(\mathrm{sSFR}_{100}\,[\mathrm{yr}^{-1}])$')
+            ax.set_xlim(-12, -8) # Adjusted typical sSFR range
+            cb_label = "Dust attenuation (dust2)"
+        else:
+            sc = ax.scatter(dust, y_data[i], c=log_ssfr, cmap="plasma", 
+                            alpha=0.7, edgecolor='black', s=50)
+            ax.set_xlabel(r'Dust attenuation (dust2)')
+            ax.set_xlim(-0.1, 3)
+            cb_label = r'$\log(\mathrm{sSFR}_{100})$'
+
+        ax.axhline(0, ls="--", c="grey", alpha=0.5)
+        ax.set_ylabel(r'$N_\sigma$')
+        ax.set_title(f'{bands[i]}: $N_\sigma$ vs ' + ('sSFR' if i%2==0 else 'Dust'))
+        ax.set_ylim(-6, 6)
+        
+        cb = fig.colorbar(sc, ax=ax)
+        cb.set_label(cb_label)
+
+    plt.tight_layout()
+    filename = os.path.join(out_dir, 'nsigma_vs_params.png')
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✅ Plot saved as {filename}")
+    plt.show()
+    
+    
+    
+    
 
 
 def plot_extremes(objid, base_paths, add_fit=False, save_path=None):
