@@ -11,6 +11,8 @@ from prospect.models.transforms import logsfr_ratios_to_sfrs
 from prospect.sources import FastStepBasis
 from prospect.utils.plotting import posterior_samples
 from astropy.cosmology import Planck18 as cosmo
+from prospect.models.sedmodel import PolySpecModel, SpecModel
+
 #from astropy.cosmology import WMAP9 as cosmo
 from .params import *
 from .plotting import *
@@ -46,6 +48,9 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         if objid in [7696, 11247]:
             continue    # Skip high-z filler targets
         
+        if objid in [12020, 18977]:
+            continue    # Skip broad-line AGN
+        
         filename = os.path.join(stats_dir, f"{objid}.pkl")
         
         #if os.path.exists(filename):
@@ -75,6 +80,12 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         full_path = os.path.join(data_dir, h5_file)
         results, obs, model = reader.results_from(full_path)
         
+        print(results['model_params'])
+        
+        if model == None:
+            model = dict(results['model_params'][0])
+            model = PolySpecModel(model)
+            
         #print(obs['filters'])
         #return
         
@@ -285,7 +296,7 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
 
 
 
-def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
+def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_dust=True):
     """Main function to reconstruct and plot PROSPECTOR results with MIRI data
     
     Parameters:
@@ -303,6 +314,8 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
     with fits.open(phot_table) as hdul:
         galaxy_ids = hdul[1].data['ID']
     
+    #galaxy_ids = [17517]
+    
     print(f"Analysing fits of {len(galaxy_ids)} galaxies...\n")
     
     os.makedirs(stats_dir, exist_ok=True)
@@ -313,6 +326,9 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         
         if objid in [7696, 11247]:
             continue    # Skip high-z filler targets
+        
+        if objid in [12020, 18977]:
+            continue    # Skip broad-line AGN
         
         filename = os.path.join(stats_dir, f"{objid}.pkl")
         
@@ -342,9 +358,6 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         # Load PROSPECTOR results
         full_path = os.path.join(data_dir, h5_file)
         results, obs, model = reader.results_from(full_path)
-        
-        #print(obs['filters'])
-        #return
         
         # Now we have to exclude the last 3 parameters from the fit
         map_parameters = get_MAP(results)
@@ -413,6 +426,11 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         
         # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
         sps = FastStepBasis(zcontinuous=1)
+        
+        if add_dust == False:
+            # Toggle the model setting to False
+            # This prevents the code from adding the IR 'glow'
+            model.params['add_dust_emission'] = np.array([False])
 
         # Obtain best fit model spectrum and model photometry    
         spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
@@ -430,7 +448,7 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         samples = posterior_samples(results, 100)
         
         sample_specs = []
-        for params_i in samples:
+        for params_i in samples:    
             spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
             sample_specs.append(spec_i)
         sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
@@ -443,6 +461,44 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         # Compute filter wavelength in microns
         phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
         
+        filter_dict_miri = {
+            'F770W':  'jwst_f770w',
+            'F1000W': 'jwst_f1000w',
+            'F1800W': 'jwst_f1800w',
+            'F2100W': 'jwst_f2100w'
+        }
+        
+        # 1. Initialize containers
+        miri_mask = []        # Indices in the 'obs' arrays that are MIRI and not NaN
+        miri_band_names = []  # To keep track of which specific band is at which index
+        miri_filters = []
+
+        # 2. Iterate and Filter
+        for i, filt in enumerate(obs['filters']):
+            # Check for NaN first to clean the entire analysis
+            if np.isnan(obs['maggies'][i]):
+                continue
+                
+            # Check if this filter is in our MIRI dictionary
+            if filt.name in filter_dict_miri.values():
+                miri_mask.append(i)
+                
+                # Map back to the short name (F770W, etc.) for your stats dict
+                for code, sedpy_name in filter_dict_miri.items():
+                    if sedpy_name == filt.name:
+                        miri_band_names.append(code)
+                        miri_filters.append(filt)
+                        break
+
+        # 3. Compute Separate Statistics
+        # Extract only the valid MIRI data
+        phot_miri = phot[miri_mask] # phot is the model photometry from model.predict
+        phot_wave_miri = phot_wave[miri_mask]
+        
+        phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
+        phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
+        phot_miri_err = 0.5*(phot_miri_upper - phot_miri_lower)
+        
         print("Successfully reconstructed fit...")
         
         ##########################################
@@ -450,6 +506,44 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
         # Section 3: Calculating fit quality stats
         #
         ##########################################
+        
+        # Safer way to ensure you align with phot_miri
+        miri_flux = obs['maggies'][miri_mask]
+        miri_err  = obs['maggies_unc'][miri_mask]
+        
+        # Compute N_sigma
+        delta = miri_flux - phot_miri
+        tot_err = np.sqrt(phot_miri_err**2 + miri_err**2)
+        N_sigma = delta / tot_err
+        
+        # Compute it also in percentage of observed MIRI flux
+        perc = delta / miri_flux
+        
+        chi2_red = np.sum(N_sigma**2) / len(N_sigma)
+        
+        fit_quality = {}
+        fit_quality['chi2_red'] = chi2_red
+        
+        for i, filt in enumerate(miri_filters):
+            
+            # Extracts 'F770W' from 'jwst_f770w'
+            name = filt.name.split('_')[-1].upper()
+            
+            snr = (miri_flux[i] / miri_err[i]) if miri_err[i] > 0 else 0
+            
+            fit_quality[name] = {
+                'galaxy_id': objid,
+                'zred': zred,
+                'obs_flux': miri_flux[i] * maggies_to_muJy,
+                'obs_err': miri_err[i] * maggies_to_muJy,
+                'mod_flux': phot_miri[i] * maggies_to_muJy,
+                'mod_err': phot_miri_err[i] * maggies_to_muJy,
+                'n_sigma': N_sigma[i],
+                'frac_diff': perc[i],
+                'snr': snr
+            }            
+        
+        print("Computed fit quality statistics")
         
         data = {
             # Important metadata
@@ -465,11 +559,16 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
                 'wave_spec': wave_spec,
                 'sample_specs': sample_specs[:10],
                 'phot': phot,
-                'phot_wave': phot_wave
+                'phot_wave': phot_wave,
+                'phot_miri': phot_miri,
+                'phot_miri_err': phot_miri_err,
+                'phot_wave_miri': phot_wave_miri
             },
             
             # One entry for the observation dictionary
             'obs': obs,
+            
+            'fit_quality': fit_quality,
             
             'galaxy_properties': {
                 'logmass': logmass,
