@@ -273,14 +273,14 @@ def plot_miri_fit(filename, plot_dir=None):
     # Get current labels to prevent duplicates
     _, labels = ax.get_legend_handles_labels()
     
-    for i, filt in enumerate(obs['filters_all']):
+    for i, filt in enumerate(obs['filters']):
         
         wave = obs['phot_wave'][i] * 1e-4  # convert to µm
         flux = obs['maggies'][i] * maggies_to_muJy  # µJy
         err  = obs['maggies_unc'][i] * maggies_to_muJy  # µJy
         
-        name = filt.name.lower()
-        
+        name = filt.name.lower()     
+
         # Improved Upper Limit Logic for MIRI
         uplims = False
         
@@ -299,6 +299,23 @@ def plot_miri_fit(filename, plot_dir=None):
             style = instrument_styles['nircam']
         else:
             continue  # skip unknown filters
+        
+        """
+        if name == "jwst_f770w":
+            cs_flux = 2.0627863629430663
+            cs_err = 0.11323451897914114
+            
+            ax.errorbar(    # Plot COSMOS-Webb data
+                wave, cs_flux, yerr=cs_err,
+                fmt='p',
+                color='dodgerblue',
+                markeredgecolor=style.get('edgecolor', 'none'),
+                alpha=style.get('alpha', 1.0),
+                markersize=10,
+                uplims=uplims, # This creates the actual downward arrow
+                label='COSMOS2025'
+            )
+        """
 
         ax.errorbar(
             wave, flux, yerr=err,
@@ -314,6 +331,7 @@ def plot_miri_fit(filename, plot_dir=None):
         # Update labels list to prevent duplicates in current loop
         if style['label'] not in labels:
             labels.append(style['label'])
+            
     
     # Compute bounds
     wave_mask = (wave_spec_rs >= 0.4) & (wave_spec_rs <= 35)
