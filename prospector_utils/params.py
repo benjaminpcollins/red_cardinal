@@ -16,9 +16,104 @@ from prospect.utils.obsutils import fix_obs
 from scipy.signal import medfilt
 from scipy import interpolate
 
+from sedpy.observate import getSED
 
-bluejay = '/Users/benjamincollins/University/Master/Red_Cardinal/BlueJay/bluejay_phot_cat_v1.4.fits'
-miri_phot = '/Users/benjamincollins/University/Master/Red_Cardinal/photometry/phot_tables/Photometry_Table_MIRI.fits'
+
+def get_model_photometry(spec, wave_spec, filters, zred):
+    # 1) maggies -> f_nu_obs [erg/s/cm^2/Hz]
+    # We assume 'spec' is already the flux you see at Earth.
+    fnu_obs = spec * 3631e-23
+    
+    # 2) Wavelengths -> Observer-frame Angstroms
+    lam_obs_A = wave_spec * (1.0 + zred)
+    
+    # 3) f_nu_obs -> f_lambda_obs [erg/s/cm^2/Å]
+    # We use observer-frame wavelengths for the conversion.
+    wave_obs_cm = lam_obs_A * 1e-8
+    flam_obs = fnu_obs * (const.c.cgs.value / wave_obs_cm**2) / 1e8
+    
+    # 4) The Key Step: Pass Observer-frame wavelengths to getSED
+    # This ensures the filter transmission curves align with the redshifted spectrum.
+    phot_new = getSED(lam_obs_A, flam_obs, filterlist=filters, linear_flux=True)
+
+    return phot_new
+
+def update_obs_with_miri(objid, obs, phot_table_miri):
+    """Add only VALID MIRI photometry to obs."""
+    
+    # -------------------------------------------------
+    # 1. Load MIRI catalogue row
+    # -------------------------------------------------
+    with fits.open(phot_table_miri) as hdul:
+        data = hdul[1].data
+        row = data[data['ID'] == objid]
+
+    if len(row) == 0:
+        print(f"No MIRI data for {objid}")
+        return obs
+
+    row = row[0]
+
+    filter_dict_miri = {
+        'F770W':  'jwst_f770w',
+        'F1000W': 'jwst_f1000w',
+        'F1800W': 'jwst_f1800w',
+        'F2100W': 'jwst_f2100w'
+    }
+
+    # -------------------------------------------------
+    # 2. Collect VALID MIRI bands
+    # -------------------------------------------------
+    valid_filters = []
+    valid_fluxes  = []
+    valid_errors  = []
+    valid_codes   = []
+
+    for code, sedpy_name in filter_dict_miri.items():
+
+        flux = row[f"{code}_flux"]
+        err  = row[f"{code}_flux_err"]
+
+        if np.isfinite(flux) and np.isfinite(err) and err > 0:
+            valid_fluxes.append(flux / 3631)      # Jy → maggies
+            valid_errors.append(err / 3631)
+            valid_filters.append(sedpy_name)
+            valid_codes.append(code)
+
+    if len(valid_fluxes) == 0:
+        print("No valid MIRI bands.")
+        return obs
+
+    # -------------------------------------------------
+    # 3. Extend obs consistently
+    # -------------------------------------------------
+    obs_new = obs.copy()
+
+    # concatenate maggies
+    obs_new['maggies_all'] = np.concatenate([obs['maggies'], valid_fluxes])
+    obs_new['maggies_unc_all'] = np.concatenate([obs['maggies_unc'], valid_errors])
+
+    # concatenate filters
+    miri_filters = load_filters(valid_filters)
+
+    obs_new['filters_all'] = obs['filters'] + miri_filters
+    obs_new['filters_miri'] = miri_filters
+    obs_new['filter_code_all'] = obs['filter_code'] + valid_codes
+
+    # wavelengths
+    obs_new['phot_wave_all'] = np.array(
+        [f.wave_effective for f in obs_new['filters_all']]
+    )
+    
+    # mask
+    obs_new['valid_mask_all'] = (
+        np.isfinite(obs_new['maggies_all']) &
+        np.isfinite(obs_new['maggies_unc_all']) &
+        (obs_new['maggies_unc_all'] > 0)
+    )
+
+    return obs_new
+
 
 def get_MAP(res, verbose=False):
     """
@@ -50,14 +145,14 @@ def get_MAP(res, verbose=False):
 
 
 
-def build_obs(objid):
+def build_obs(objid, phot_table_miri):
     """Build observation dictionary with photometry (no spectroscopy)"""
     
     # Load photometry data
     phot_hst_nircam = fits.open(bluejay)[1].data
     ph_hst_nircam = phot_hst_nircam[phot_hst_nircam['ID'] == objid]
     
-    phot_miri = fits.open(miri_phot)[1].data
+    phot_miri = fits.open(phot_table_miri)[1].data
     ph_miri = phot_miri[phot_miri['ID'] == objid]
     
     if ph_miri is None or len(ph_miri) == 0:
@@ -93,12 +188,16 @@ def build_obs(objid):
     }
     
     # Combined filters used in original fit
-    filter_code_orig = list(filter_dict_3dhst.keys()) + list(filter_dict_nircam.keys())# + list(filter_dict_miri.keys()))
-    filter_name_orig = list(filter_dict_3dhst.values()) + list(filter_dict_nircam.values())# + list(filter_dict_miri.values()))
+    filter_code_orig = list(filter_dict_3dhst.keys()) + list(filter_dict_nircam.keys())
+    filter_name_orig = list(filter_dict_3dhst.values()) + list(filter_dict_nircam.values())
+    
+    # Filters present in MIRI
+    filter_code_miri = list(filter_dict_miri.keys())
+    filter_name_miri = list(filter_dict_miri.values())
     
     # All filters including MIRI
-    filter_code_all = filter_code_orig + list(filter_dict_miri.keys())
-    filter_name_all = filter_name_orig + list(filter_dict_miri.values())
+    filter_code_all = filter_code_orig + filter_code_miri
+    filter_name_all = filter_name_orig + filter_name_miri
     
     # Modify obs dictionary
     obs = {}
@@ -114,27 +213,17 @@ def build_obs(objid):
     for ff, fil in enumerate(filter_code_orig):
         fluxes[ff] = ph_hst_nircam[str(fil) + '_flux'][0]
         fluxes_err[ff] = ph_hst_nircam[str(fil) + '_flux_err'][0]
-    
-    # Extract MIRI filter fluxes from FITS table arrays
-    miri_filters_present = ph_miri['Filters'][0].split(',')  # e.g. ['F770W', 'F1800W']
-    miri_flux_array = ph_miri['Flux'][0]         # shape: (n_filters,)
-    miri_flux_err_array = ph_miri['Flux_Err'][0] # shape: (n_filters,)
 
-    # Combine all fluxes
-    fluxes_all = np.concatenate([fluxes, np.full(len(filter_dict_miri), np.nan)])
-    fluxes_err_all = np.concatenate([fluxes_err, np.full(len(filter_dict_miri), np.nan)])
+    # Combine all fluxes    
+    fluxes_all = np.copy(fluxes)
+    fluxes_err_all = np.copy(fluxes_err)
+        
+    # Dynamically add miri fluxes and errors to the existing arrays
+    for ff, fil in enumerate(filter_code_miri):
+        fluxes_all = np.append(fluxes_all, ph_miri[str(fil) + '_flux'][0])
+        fluxes_err_all = np.append(fluxes_err_all, ph_miri[str(fil) + '_flux_err'][0])
     
-    miri_filters_available = list(filter_dict_miri.keys())
-    
-    for mfilt, flux, err in zip(miri_filters_available, miri_flux_array, miri_flux_err_array):
-        if mfilt in miri_filters_present:
-            idx = filter_code_all.index(mfilt)
-            fluxes_all[idx] = flux
-            fluxes_err_all[idx] = err
-        else:
-            print(f"No match for: {repr(mfilt)}")
-
-    #print("MIRI fluxes added successfully.")
+    print("MIRI fluxes added successfully.")
     
     # Add 5% systematic error in quadrature to all bands
     fluxes_err = np.sqrt(fluxes_err**2 + (0.05*fluxes)**2)
@@ -431,6 +520,103 @@ def build_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_ag
     # ----------------------------
     
     # Now instantiate the model object using this dictionary of parameter specifications
+    model = PolySpecModel(model_params)
+    
+    return model
+
+
+def rebuild_model(zred=None, waverange=None, add_duste=True, add_neb=False, add_agn=False, fit_afe=False,
+                polyorder=10, 
+                **extras):
+    """
+    Reconstructs the PolySpecModel with live functions (callables)
+    to avoid pickling/AssertionErrors.
+    """
+
+    model_params = {}
+    
+    if zred is None:
+        raise ValueError('zred must be specified to reconstruct the SFH agebins.')
+    
+    # 1. Basic Parameters
+    model_params['zred'] = {"N": 1, "isfree": True, "init": zred, 
+                            "prior": priors.Normal(mean=zred, sigma=0.005)}
+    model_params['logzsol'] = {"N": 1, "isfree": True, "init": -0.5, 
+                               "prior": priors.TopHat(mini=-2, maxi=0.5)}
+    model_params['afe'] = {"N": 1, "isfree": False, "init": 0.0}
+    model_params["logt_wmb_hot"] = dict(N=1, isfree=False, init=10.0)
+
+    # 2. Spectral Smoothing & Calibration
+    model_params.update(TemplateLibrary['spectral_smoothing'])
+    model_params["sigma_smooth"]["prior"] = priors.TopHat(mini=50.0, maxi=400.0)
+    
+    model_params.update(TemplateLibrary['optimize_speccal'])
+    model_params['polyorder']['init'] = polyorder
+    model_params['spec_norm']['isfree'] = False
+    
+    # 3. Outlier Models
+    model_params['f_outlier_spec'] = {"N": 1, "isfree": True, "init": 0.01, 
+                                      "prior": priors.TopHat(mini=1e-5, maxi=0.2)}
+    model_params['f_outlier_phot'] = {"N": 1, "isfree": True, "init": 0.00, 
+                                      "prior": priors.TopHat(mini=0, maxi=0.5)}
+    model_params['nsigma_outlier_spec'] = {"N": 1, "isfree": False, "init": 50.0}
+    model_params['nsigma_outlier_phot'] = {"N": 1, "isfree": False, "init": 50.0}
+    model_params['spec_jitter'] = {"N": 1, "isfree": True, "init": 1.0, 
+                                   "prior": priors.TopHat(mini=0.5, maxi=15.0)}
+
+    # 4. Continuity SFH (Critical: Agebins must scale with zred)
+    tuniv = cosmo.age(zred).value
+    agelims_Myr = np.append(np.logspace(np.log10(30.0), np.log10(0.8*tuniv*1000), 12), 
+                            [0.9*tuniv*1000, tuniv*1000])
+    agelims = np.concatenate(([0.0], np.log10(agelims_Myr*1e6)))
+    agebins = np.array([agelims[:-1], agelims[1:]]).T
+    nbins = len(agelims) - 1
+    
+    model_params["logmass"] = {"N": 1, "isfree": True, "init": 10.0, 
+                               "prior": priors.TopHat(mini=8.0, maxi=13)}
+    model_params["agebins"] = {'N': nbins, 'isfree': False, 'init': agebins}
+    model_params["mass"] = {'N': nbins, 'isfree': False, 'init': 1e10/nbins,
+                            'depends_on': transforms.logsfr_ratios_to_masses}
+    model_params["logsfr_ratios"] = {'N': nbins-1, 'isfree': True, 
+                                     'init': np.zeros(nbins-1),
+                                     'prior': priors.StudentT(mean=np.zeros(nbins-1), 
+                                                              scale=np.full(nbins-1, 0.3), 
+                                                              df=np.full(nbins-1, 2))}
+
+    model_params['dust_type'] = {"N": 1, "isfree": False, "init": 4}
+    model_params['dust2'] = {"N": 1, "isfree": True, "init": 0.5, 
+                             "prior": priors.TopHat(mini=0.0, maxi=4.0)}
+    model_params["dust_index"] = {"N": 1, "isfree": True, "init": 0.0, 
+                                  "prior": priors.ClippedNormal(mini=-1.5, maxi=0.4, mean=0.0, sigma=0.3)}
+    model_params['dust1_fraction'] = {'N': 1, 'isfree': True, 'init': 1.0, 
+                                      'prior': priors.ClippedNormal(mini=0.0, maxi=2.0, mean=1.0, sigma=0.3)}
+    model_params['dust1'] = {"N": 1, "isfree": False, "depends_on": to_dust1, "init": 0.0}
+
+    if add_duste:
+        # 5. Dust and Emission
+        model_params.update(TemplateLibrary["dust_emission"])
+        model_params['duste_gamma']['isfree'] = True
+        #model_params['duste_gamma']['init']  = 0.01
+        model_params['duste_gamma']['prior'] = priors.TopHat(mini=0.0, maxi=1.0)
+        
+        model_params['duste_qpah']['isfree'] = True
+        #model_params['duste_qpah']['init']   = 3.5
+        model_params['duste_qpah']['prior']  = priors.TopHat(mini=0.5, maxi=10.0)
+        
+        model_params['duste_umin']['isfree'] = True
+        #model_params['duste_umin']['init']   = 1.0
+        model_params['duste_umin']['prior']  = priors.TopHat(mini=0.1, maxi=25.0)
+
+    if add_neb:
+        model_params.update(TemplateLibrary["nebular"])
+        model_params['gas_logz']['isfree'] = True
+        model_params['gas_logu']['isfree'] = True
+        
+        # This is likely the missing link for your eline_sigma error
+        model_params.update(TemplateLibrary['nebular_marginalization'])
+        model_params['eline_sigma']['isfree'] = True 
+        model_params['eline_sigma']['prior'] = priors.TopHat(mini=30, maxi=400)
+
     model = PolySpecModel(model_params)
     
     return model
