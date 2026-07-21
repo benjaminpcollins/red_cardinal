@@ -6,14 +6,18 @@ import pandas as pd
 import prospect.io.read_results as reader
 
 from astropy.io import fits
-from astropy.cosmology import WMAP9 as cosmo
+#from astropy.cosmology import WMAP9 as cosmo
 from prospect.models.transforms import logsfr_ratios_to_sfrs
 from prospect.sources import FastStepBasis
 from prospect.utils.plotting import posterior_samples
 from astropy.cosmology import Planck18 as cosmo
 from prospect.models.sedmodel import PolySpecModel, SpecModel
 
-#from astropy.cosmology import WMAP9 as cosmo
+
+from astropy import units as u
+from astropy import constants as const
+from scipy.integrate import trapezoid
+
 from .params import *
 from .plotting import *
 
@@ -392,24 +396,22 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_d
         logmass = MAP['logmass']
         dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
 
-        print(dust2)
         
-    return None
-    """
-    dust_tesc – (default: 7.0) 
-        Stars younger than dust_tesc are attenuated by both dust1 and dust2, 
-            while stars older are attenuated by dust2 only. Units are log(yrs).
-    dust1 – (default: 0.0) 
-        Dust parameter describing the attenuation of young stellar light, 
-            i.e. where t <= dust_tesc (for details, see Conroy et al. 2009a).
-    dust2 – (default: 0.0) 
-        Dust parameter describing the attenuation of old stellar light, 
-        i.e. where t > dust_tesc (for details, see Conroy et al. 2009a).
+        """
+        dust_tesc – (default: 7.0) 
+            Stars younger than dust_tesc are attenuated by both dust1 and dust2, 
+                while stars older are attenuated by dust2 only. Units are log(yrs).
+        dust1 – (default: 0.0) 
+            Dust parameter describing the attenuation of young stellar light, 
+                i.e. where t <= dust_tesc (for details, see Conroy et al. 2009a).
+        dust2 – (default: 0.0) 
+            Dust parameter describing the attenuation of old stellar light, 
+            i.e. where t > dust_tesc (for details, see Conroy et al. 2009a).
 
-    Summary taken from https://dfm.io/python-fsps/current/stellarpop_api/#fsps.StellarPopulation.dust_mass
-    """ 
-    
-    def xyz():
+        Summary taken from https://dfm.io/python-fsps/current/stellarpop_api/#fsps.StellarPopulation.dust_mass
+        """ 
+        
+        
         # Reconstruct agebins used in the fits
         tuniv = cosmo.age(zred).value
         agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
@@ -615,8 +617,7 @@ def analyse_miri_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_d
             
         if plot_dir:
             plot_miri_fit(filename, plot_dir)
-    
-    return 
+ 
 
 
 
@@ -915,5 +916,101 @@ def analyse_photspec_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
             
         if plot_dir:
             plot_reconstructed_fit(filename, plot_dir)
+    
+    return 
+
+def get_dust_luminosity(objid, data_dir, plot_dir=None):
+    
+    dust = os.path.join(data_dir, "pickle_files", f"{objid}.pkl")
+    nodust = os.path.join(data_dir, "pickle_nodust", f"{objid}.pkl")
+    
+    
+    with open(dust, 'rb') as f:
+        fit_data = pkl.load(f)
+
+    zred = fit_data['zred']
+    maggies_to_muJy = fit_data['maggies_to_muJy']
+    
+    model_dust = fit_data['model']
+    spec_best = model['spec_best']
+    spec_16th = model['spec_16th']
+    spec_median = model['spec_median']
+    spec_84th = model['spec_84th']
+    
+    spec_dust = model_dust['spec_best']
+    wave_spec = model_dust['wave_spec']
+    
+    # Convert to µJy
+    spec_dust_scaled = spec_dust * maggies_to_muJy
+    
+    wave_spec_um = wave_spec * 1e-4
+    
+    # No dust case
+    with open(nodust, 'rb') as f:
+        fit_data = pkl.load(f)
+
+    zred = fit_data['zred']
+    
+    model_nodust = fit_data['model']
+    spec_nodust = model_nodust['spec_best']
+    
+    # Convert to µJy
+    spec_nodust_scaled = spec_nodust * maggies_to_muJy
+    
+    
+    spec_ir = spec_dust_scaled - spec_nodust_scaled
+    
+    # Specify luminosity between 8 and 1000µm
+    wave_mask = (wave_spec_um >= 8.0) & (wave_spec_um <= 1000.0)
+    
+    # Apply mask to spectrum(s)
+    spec_within = spec_ir[wave_mask]  # works for 1D or 2D (e.g. percentiles)
+    
+    w_rest_slice = wave_spec_um[wave_mask] * u.um
+    f_nu_slice = spec_ir[wave_mask] * u.uJy
+
+    # 3. Convert wavelengths to frequency (Hz)
+    # Nu = c / lambda
+    freq_slice = (const.c / w_rest_slice).to(u.Hz)
+
+    # 4. Integrate f_nu over frequency (d_nu)
+    # Note: since frequency decreases as wavelength increases, reverse arrays for positive integral
+    F_ir = trapezoid(f_nu_slice.to(u.erg / (u.s * u.cm**2 * u.Hz)).value[::-1], 
+                    freq_slice.value[::-1]) * (u.erg / (u.s * u.cm**2))
+
+    # 5. Convert Flux to Luminosity using Luminosity Distance D_L
+    dL = cosmo.luminosity_distance(zred)
+
+    # Bolometric Luminosity formula
+    L_ir = (4 * np.pi * dL**2 * F_ir * (1 + zred)).to(u.L_sun)
+
+    print(f"Log(L_IR / L_sun) = {np.log10(L_ir.value):.2f}")
+    
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+
+    #w_rest_slice = wave_rest[mask] * u.um
+    #f_nu_slice = spec_ir[mask] * u.uJy
+
+    # Compute y-axis limits
+    ymin = np.nanmin(spec_within)
+    ymax = np.nanmax(spec_within)
+    
+    # Add margin proportionally, protecting against log-scale issues
+    ymin_plot = ymin * 0.2  # reduce, but stay > 0
+    ymax_plot = ymax * 5   # increase
+
+    # Set limits
+    ax.set_ylim(ymin_plot, ymax_plot)
+
+    # Plot formatting
+    ax.set_xlabel('Restframe Wavelength [µm]', fontsize=13)
+    ax.set_ylabel('Flux [µJy]', fontsize=13)
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+
+    ax.plot(wave_spec_um, spec_ir)
+    plt.show()
+    
     
     return 
