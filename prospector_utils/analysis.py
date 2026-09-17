@@ -23,11 +23,13 @@ from .plotting import *
 
 
 
-def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
+def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=True):
     """Main function to reconstruct and plot PROSPECTOR results with MIRI data
     
     Parameters:
     -----------
+    ids : list
+        List of galaxy IDs to analyze
     phot_table : str
         Path to the MIRI photometry table
     data_dir : str
@@ -39,10 +41,7 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=
     add_duste : bool, optional
         Add dust emission to the fits
     """
-    
-    with fits.open(phot_table) as hdul:
-        galaxy_ids = hdul[1].data['ID']
-    
+
     print(f"Analysing fits of {len(galaxy_ids)} galaxies...\n")
     
     os.makedirs(stats_dir, exist_ok=True)
@@ -50,14 +49,6 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=
     for objid in galaxy_ids:
         
         objid = int(objid)
-        
-        if objid in [7696, 11247]:
-            print("Skipping high-z filler target")
-            continue    # Skip high-z filler targets
-        
-        if objid in [12020, 18977]:
-            print("Skipping broad-line AGN")
-            continue    # Skip broad-line AGN
         
         filename = os.path.join(stats_dir, f"{objid}.pkl")
         
@@ -106,57 +97,10 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=
         zred = MAP['zred']
         logmass = MAP['logmass']
         dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
-
-        """
-        dust_tesc – (default: 7.0) 
-            Stars younger than dust_tesc are attenuated by both dust1 and dust2, 
-                while stars older are attenuated by dust2 only. Units are log(yrs).
-        dust1 – (default: 0.0) 
-            Dust parameter describing the attenuation of young stellar light, 
-                i.e. where t <= dust_tesc (for details, see Conroy et al. 2009a).
-        dust2 – (default: 0.0) 
-            Dust parameter describing the attenuation of old stellar light, 
-            i.e. where t > dust_tesc (for details, see Conroy et al. 2009a).
-
-        Summary taken from https://dfm.io/python-fsps/current/stellarpop_api/#fsps.StellarPopulation.dust_mass
-        """ 
-        
-        # Reconstruct agebins used in the fits
-        tuniv = cosmo.age(zred).value
-        agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
-        agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
-        agebins = np.array([agelims[:-1], agelims[1:]]).T
-        nbins = len(agelims) - 1
-        
-        # Collect logsfr_ratios
-        logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
-        
-        # Convert to SFRs
-        sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
-        
-        # Convert log age bins to linear time (yr)
-        bin_edges = 10**agebins  # shape (nbins, 2)
-        
-        # Select bins younger than a certain timescale
-        t100 = 1e8  # 100 Myr in years
-        t30 = 3e7   #  30 Myr in years
-        
-        # Compute overlap of each bin with interval [0, tcut]
-        overlap100 = np.maximum(0.0, np.minimum(bin_edges[:,1], t100) - np.minimum(bin_edges[:,0], t100))
-        overlap30 = np.maximum(0.0, np.minimum(bin_edges[:,1], t30) - np.minimum(bin_edges[:,0], t30))
-        
-        # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
-        mass_in_last_100 = np.sum(sfrs * overlap100)
-        sfr_last100 = mass_in_last_100 / t100
-
-        mass_in_last_30 = np.sum(sfrs * overlap30)
-        sfr_last30 = mass_in_last_30 / t30
-        
-        print("Extracted galaxy properties...")
         
         ##########################################
         #
-        # Section 2: Rebuilding the PROSPECTOR fit
+        # Section 1: Rebuilding the PROSPECTOR fit
         #
         ##########################################
         
@@ -223,6 +167,97 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=
         
         ##########################################
         #
+        # Section 2: Extracting galaxy properties
+        #
+        ##########################################
+        
+        # Reconstruct agebins used in the fits
+        tuniv = cosmo.age(zred).value
+        agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
+        agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
+        agebins = np.array([agelims[:-1], agelims[1:]]).T
+        nbins = len(agelims) - 1
+        
+        # Collect logsfr_ratios
+        logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
+        
+        # Convert to SFRs
+        sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
+        
+        # Convert log age bins to linear time (yr)
+        bin_edges = 10**agebins  # shape (nbins, 2)
+        
+        # Select bins younger than a certain timescale
+        t100 = 1e8  # 100 Myr in years
+        t30 = 3e7   #  30 Myr in years
+        
+        # Compute overlap of each bin with interval [0, tcut]
+        overlap100 = np.maximum(0.0, np.minimum(bin_edges[:,1], t100) - np.minimum(bin_edges[:,0], t100))
+        overlap30 = np.maximum(0.0, np.minimum(bin_edges[:,1], t30) - np.minimum(bin_edges[:,0], t30))
+        
+        # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
+        mass_in_last_100 = np.sum(sfrs * overlap100)
+        sfr_last100 = mass_in_last_100 / t100
+
+        mass_in_last_30 = np.sum(sfrs * overlap30)
+        sfr_last30 = mass_in_last_30 / t30
+        
+        # ----------------------------------------------------------------------
+        # Compute SFR distribution across posterior samples
+        # ----------------------------------------------------------------------
+        sfr_100_samples = []
+        sfr_30_samples = []
+        dust2_samples = []
+
+        # Map theta indices for fast lookup
+        theta_names = results['theta_labels']
+        logmass_idx = theta_names.index('logmass')
+        ratio_indices = [
+            i for i, name in enumerate(theta_names) 
+            if name.startswith('logsfr_ratios_')
+        ]
+
+        for s_params in samples:
+            s_logmass = s_params[logmass_idx]
+            s_ratios = s_params[ratio_indices]
+            
+            # Calculate SFRs for this specific posterior draw
+            s_sfr_bins = logsfr_ratios_to_sfrs(s_logmass, s_ratios, agebins)
+            
+            # Weight across the timescales
+            s_sfr100 = np.sum(s_sfr_bins * overlap100) / t100
+            s_sfr30  = np.sum(s_sfr_bins * overlap30) / t30
+            
+            s_dust2 = s_params[theta_names.index('dust2')]
+            
+            sfr_100_samples.append(s_sfr100)
+            sfr_30_samples.append(s_sfr30)
+            dust2_samples.append(s_dust2)
+
+        sfr_100_samples = np.array(sfr_100_samples)
+        sfr_30_samples = np.array(sfr_30_samples)
+        dust2_samples = np.array(dust2_samples)
+
+        # 16th, 50th (median), and 84th percentiles (1-sigma equivalent)
+        sfr_100_16, sfr_100_med, sfr_100_84 = np.percentile(sfr_100_samples, [16, 50, 84])
+        sfr_30_16,  sfr_30_med,  sfr_30_84  = np.percentile(sfr_30_samples, [16, 50, 84])
+        dust2_16,  dust2_med,  dust2_84  = np.percentile(dust2_samples, [16, 50, 84])
+        
+        # Asymmetric 1-sigma uncertainties
+        sfr_100_err_low  = sfr_100_med - sfr_100_16
+        sfr_100_err_high = sfr_100_84 - sfr_100_med
+
+        sfr_30_err_low  = sfr_30_med - sfr_30_16
+        sfr_30_err_high = sfr_30_84 - sfr_30_med
+        
+        dust2_err_low  = dust2_med - dust2_16
+        dust2_err_high = dust2_84 - dust2_med
+        
+        
+        print("Extracted galaxy properties...")
+        
+        ##########################################
+        #
         # Section 3: Calculating fit quality stats
         #
         ##########################################
@@ -250,17 +285,33 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=
             # Extracts 'F770W' from 'jwst_f770w'
             name = filt.name.split('_')[-1].upper()
             
-            snr = (miri_flux[i] / miri_err[i]) if miri_err[i] > 0 else 0
+            f_o = miri_flux[i]
+            e_o = miri_err[i]
+            f_m = phot_miri[i]
+            e_m = phot_miri_err[i]
+            
+            snr = (f_o / e_o) if e_o > 0 else 0
+            
+            # Compute log ratio and propagate error
+            if (f_o > 0) and (f_m > 0) and (e_o > 0) and (e_m > 0):
+                log_ratio = np.log10(f_m / f_o)
+                frac_var = (e_m / f_m)**2 + (e_o / f_o)**2
+                log_ratio_err = (1.0 / np.log(10)) * np.sqrt(frac_var)
+            else:
+                log_ratio = np.nan
+                log_ratio_err = np.nan
             
             fit_quality[name] = {
                 'galaxy_id': objid,
                 'zred': zred,
-                'obs_flux': miri_flux[i] * maggies_to_muJy,
-                'obs_err': miri_err[i] * maggies_to_muJy,
-                'mod_flux': phot_miri[i] * maggies_to_muJy,
-                'mod_err': phot_miri_err[i] * maggies_to_muJy,
+                'obs_flux': f_o * maggies_to_muJy,
+                'obs_err': e_o * maggies_to_muJy,
+                'mod_flux': f_m * maggies_to_muJy,
+                'mod_err': e_m * maggies_to_muJy,
                 'n_sigma': N_sigma[i],
                 'frac_diff': perc[i],
+                'log_ratio': log_ratio,
+                'log_ratio_err': log_ratio_err,
                 'snr': snr
             }            
         
@@ -294,8 +345,19 @@ def analyse_fits(phot_table, data_dir, plot_dir=None, stats_dir=None, add_duste=
             'galaxy_properties': {
                 'logmass': logmass,
                 'dust2': dust2,
-                'sfr_100myr': sfr_last100,
-                'sfr_30myr': sfr_last30,
+                
+                # 100 Myr averages
+                'sfr_100myr': sfr_last100,             # MAP value
+                'sfr_100myr_median': sfr_100_med,      # Posterior median
+                'sfr_100myr_err_low': sfr_100_err_low,
+                'sfr_100myr_err_high': sfr_100_err_high,
+                
+                # 30 Myr averages
+                'sfr_30myr': sfr_last30,               # MAP value
+                'sfr_30myr_median': sfr_30_med,        # Posterior median
+                'sfr_30myr_err_low': sfr_30_err_low,
+                'sfr_30myr_err_high': sfr_30_err_high,
+                
                 'sfr_bins': sfrs,
                 'agebins': agebins
             },
@@ -919,98 +981,132 @@ def analyse_photspec_fits(phot_table, data_dir, plot_dir=None, stats_dir=None):
     
     return 
 
-def get_dust_luminosity(objid, data_dir, plot_dir=None):
-    
-    dust = os.path.join(data_dir, "pickle_files", f"{objid}.pkl")
-    nodust = os.path.join(data_dir, "pickle_nodust", f"{objid}.pkl")
-    
-    
-    with open(dust, 'rb') as f:
+# --- Helper function to extract and scale spectra ---
+def _load_and_extract_spectra(file_path):
+    """Loads a Prospector pickle file and extracts scaled best-fit,
+
+    percentile spectra (in uJy), rest-frame wavelengths (in um), and zred.
+    """
+    with open(file_path, 'rb') as f:
         fit_data = pkl.load(f)
 
     zred = fit_data['zred']
     maggies_to_muJy = fit_data['maggies_to_muJy']
+    model = fit_data['model']
+    props = fit_data['galaxy_properties']
     
-    model_dust = fit_data['model']
-    spec_best = model['spec_best']
-    spec_16th = model['spec_16th']
-    spec_median = model['spec_median']
-    spec_84th = model['spec_84th']
-    
-    spec_dust = model_dust['spec_best']
-    wave_spec = model_dust['wave_spec']
-    
-    # Convert to µJy
-    spec_dust_scaled = spec_dust * maggies_to_muJy
-    
-    wave_spec_um = wave_spec * 1e-4
-    
-    # No dust case
-    with open(nodust, 'rb') as f:
-        fit_data = pkl.load(f)
+    wave_spec_um = (model['wave_spec'] * 1e-4) / (1 + zred)  # Rest-frame um
 
-    zred = fit_data['zred']
-    
-    model_nodust = fit_data['model']
-    spec_nodust = model_nodust['spec_best']
-    
-    # Convert to µJy
-    spec_nodust_scaled = spec_nodust * maggies_to_muJy
-    
-    
-    spec_ir = spec_dust_scaled - spec_nodust_scaled
-    
-    # Specify luminosity between 8 and 1000µm
-    wave_mask = (wave_spec_um >= 8.0) & (wave_spec_um <= 1000.0)
-    
-    # Apply mask to spectrum(s)
-    spec_within = spec_ir[wave_mask]  # works for 1D or 2D (e.g. percentiles)
-    
-    w_rest_slice = wave_spec_um[wave_mask] * u.um
-    f_nu_slice = spec_ir[wave_mask] * u.uJy
+    # Extract & scale spectra in a dictionary
+    spectra = {
+        'best': model['spec_best'] * maggies_to_muJy,
+        '16th': model['spec_16th'] * maggies_to_muJy,
+        'median': model['spec_median'] * maggies_to_muJy,
+        '84th': model['spec_84th'] * maggies_to_muJy
+    }
 
-    # 3. Convert wavelengths to frequency (Hz)
-    # Nu = c / lambda
-    freq_slice = (const.c / w_rest_slice).to(u.Hz)
+    return spectra, wave_spec_um, zred, props
 
-    # 4. Integrate f_nu over frequency (d_nu)
-    # Note: since frequency decreases as wavelength increases, reverse arrays for positive integral
-    F_ir = trapezoid(f_nu_slice.to(u.erg / (u.s * u.cm**2 * u.Hz)).value[::-1], 
-                    freq_slice.value[::-1]) * (u.erg / (u.s * u.cm**2))
 
-    # 5. Convert Flux to Luminosity using Luminosity Distance D_L
+# --- Helper function for integration ---
+def _integrate_spectrum(spec_uJy, wave_rest_um, zred):
+    """Integrates f_nu over rest-frame 8-1000 um and converts to L_sun."""
+    # Mask rest-frame 8 to 1000 um
+    mask = (wave_rest_um >= 8.0) & (wave_rest_um <= 1000.0)
+
+    if not np.any(mask):
+        return np.nan * u.L_sun
+
+    w_rest = wave_rest_um[mask] * u.um
+    f_nu = spec_uJy[mask] * u.uJy
+
+    # Frequency conversion: nu = c / lambda
+    freq = (const.c / w_rest).to(u.Hz)
+
+    # Integrate over frequency (reverse for positive dx)
+    f_nu_cgs = f_nu.to(u.erg / (u.s * u.cm**2 * u.Hz)).value
+    F_ir = trapezoid(f_nu_cgs[::-1], freq.value[::-1]) * (
+        u.erg / (u.s * u.cm**2)
+    )
+
+    # Convert flux to luminosity using luminosity distance
     dL = cosmo.luminosity_distance(zred)
-
-    # Bolometric Luminosity formula
     L_ir = (4 * np.pi * dL**2 * F_ir * (1 + zred)).to(u.L_sun)
 
-    print(f"Log(L_IR / L_sun) = {np.log10(L_ir.value):.2f}")
+    return L_ir
+
+
+# --- Main Function ---
+def get_dust_luminosity(objid, data_dir):
+    """Computes total L_IR (8-1000 um) and 16th/84th uncertainties
+
+    from Prospector dust vs no-dust fit results.
+    """
     
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-
-    #w_rest_slice = wave_rest[mask] * u.um
-    #f_nu_slice = spec_ir[mask] * u.uJy
-
-    # Compute y-axis limits
-    ymin = np.nanmin(spec_within)
-    ymax = np.nanmax(spec_within)
+    dust_pickle_path = os.path.join(data_dir, "pickle_files", f"{objid}.pkl") 
+    nodust_pickle_path = os.path.join(data_dir, "pickle_nodust", f"{objid}.pkl") 
     
-    # Add margin proportionally, protecting against log-scale issues
-    ymin_plot = ymin * 0.2  # reduce, but stay > 0
-    ymax_plot = ymax * 5   # increase
+    # 1. Load both runs
+    dust_spec, wave_rest_um, zred, props = _load_and_extract_spectra(dust_pickle_path)
+    nodust_spec, _, _ , _ = _load_and_extract_spectra(nodust_pickle_path)
 
-    # Set limits
-    ax.set_ylim(ymin_plot, ymax_plot)
+    # 2. Subtract no-dust continuum from dust continuum
+    spec_ir_best   = dust_spec['best']   - nodust_spec['best']
+    spec_ir_median = dust_spec['median'] - nodust_spec['median']
+    spec_ir_16th   = dust_spec['16th']   - nodust_spec['16th']
+    spec_ir_84th   = dust_spec['84th']   - nodust_spec['84th']
 
-    # Plot formatting
-    ax.set_xlabel('Restframe Wavelength [µm]', fontsize=13)
-    ax.set_ylabel('Flux [µJy]', fontsize=13)
-    ax.set_xscale('log')
-    ax.set_yscale('log')
+    # 3. Integrate components
+    L_ir_best   = _integrate_spectrum(spec_ir_best,   wave_rest_um, zred)
+    L_ir_median = _integrate_spectrum(spec_ir_median, wave_rest_um, zred)
+    L_ir_16th   = _integrate_spectrum(spec_ir_16th,   wave_rest_um, zred)
+    L_ir_84th   = _integrate_spectrum(spec_ir_84th,   wave_rest_um, zred)
 
-    ax.plot(wave_spec_um, spec_ir)
-    plt.show()
+    # 4. Compute log values
+    log_L_best   = np.log10(L_ir_best.value)
+    log_L_median = np.log10(L_ir_median.value)
+    
+    # Calculate uncertainties relative to the MEDIAN (guaranteed positive)
+    err_low  = log_L_median - np.log10(L_ir_16th.value)
+    err_high = np.log10(L_ir_84th.value) - log_L_median
+
+    #print(f"Galaxy ID: {objid}")
+    #print(f"Log(L_IR / L_sun) = {log_L_median:.2f} (-{err_low:.2f} / +{err_high:.2f}) [Median]")
+    #print(f"Log(L_IR / L_sun) = {log_L_best:.2f} (Best-fit MAP)")
+
+    return {
+        'log_L_ir_median': log_L_median,
+        'log_L_ir_best': log_L_best,
+        'err_low_dex': err_low,
+        'err_high_dex': err_high,
+        'logmass': props['logmass'],
+        'dust': props['dust2'],
+        'sfr': props['sfr_100myr']
+    }
     
     
-    return 
+def get_masses(objid, prosp_dir):
+    file = glob.glob(f"{prosp_dir}/*{objid}*.h5")[0]
+    results, _, _ = reader.results_from(file)
+    map_parameters = get_MAP(results)
+    
+    MAP = {}
+    for a,b in zip(results['theta_labels'], map_parameters):
+        MAP[a] = b
+        
+    mass_best = MAP['logmass']
+    mass_low = np.percentile(results['chain'][:, results['theta_labels'].index('logmass')], 16)
+    mass_median = np.percentile(results['chain'][:, results['theta_labels'].index('logmass')], 50)
+    mass_high = np.percentile(results['chain'][:, results['theta_labels'].index('logmass')], 84)
+    
+    mass_err_low = mass_median - mass_low
+    mass_err_high = mass_high - mass_median
+    
+    if mass_err_low < 0:
+        mass_err_low = 0.0
+    if mass_err_high < 0:
+        mass_err_high = 0.0
+    
+    return mass_median, mass_err_low, mass_err_high
+    
+    
