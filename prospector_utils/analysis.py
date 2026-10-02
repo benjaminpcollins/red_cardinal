@@ -222,10 +222,12 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         
         # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
         mass_in_last_100 = np.sum(sfrs * overlap100)
-        sfr_last100 = mass_in_last_100 / t100
+        sfr_last100_best = mass_in_last_100 / t100
+        log_ssfr_last100_best = np.log10(sfr_last100_best / logmass)
 
         mass_in_last_30 = np.sum(sfrs * overlap30)
-        sfr_last30 = mass_in_last_30 / t30
+        sfr_last30_best = mass_in_last_30 / t30
+        log_ssfr_last30_best = np.log10(sfr_last30_best / logmass)
         
         # ----------------------------------------------------------------------
         # Compute SFR distribution across posterior samples
@@ -235,54 +237,78 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         sfr_30_samples = []
         ssfr_30_samples = []
         dust2_samples = []
-
+        
         # Map theta indices for fast lookup
         theta_names = results['theta_labels']
+        fit_params_stats = {}
+        param_chains = {}
+        
+        for idx, param_name in enumerate(theta_names):
+            # Exclude SFR ratio parameters
+            if param_name.startswith('logsfr_ratios'):
+                continue
+            
+            chain = samples[:, idx]
+            map_val = MAP.get(param_name, np.nan)
+            
+            # Save the 1D sample vector (shape: n_samples,)
+            param_chains[param_name] = chain
+            
+            # Save quantiles, uncertainties, and MAP estimate
+            fit_params_stats[param_name] = summarise_chain(chain, map_value=map_val)
+        
+        
         logmass_idx = theta_names.index('logmass')
+        dust2_idx = theta_names.index('dust2')
         ratio_indices = [
             i for i, name in enumerate(theta_names) 
             if name.startswith('logsfr_ratios_')
         ]
 
+        sfr_100_samples = []
+        sfr_30_samples = []
+        log_ssfr_100_samples = []
+        log_ssfr_30_samples = []
+
         for s_params in samples:
-            s_logmass = s_params[logmass_idx]
-            s_ratios = s_params[ratio_indices]
+            s_logm = s_params[logmass_idx]
+            s_r = s_params[ratio_indices]
             
-            # Calculate SFRs for this specific posterior draw
-            s_sfr_bins = logsfr_ratios_to_sfrs(s_logmass, s_ratios, agebins)
+            s_bins = logsfr_ratios_to_sfrs(s_logm, s_r, agebins)
+            s_sfr100 = np.sum(s_bins * overlap100) / t100
+            s_sfr30  = np.sum(s_bins * overlap30) / t30
             
-            # Weight across the timescales
-            s_sfr100 = np.sum(s_sfr_bins * overlap100) / t100
-            s_sfr30  = np.sum(s_sfr_bins * overlap30) / t30
-            
+            s_mass = 10.0**s_logm
             sfr_100_samples.append(s_sfr100)
             sfr_30_samples.append(s_sfr30)
-            ssfr_100_samples.append(s_sfr100 / 10**s_logmass)
-            ssfr_30_samples.append(s_sfr30 / 10**s_logmass)
+            log_ssfr_100_samples.append(np.log10(s_sfr100 / s_mass) if s_sfr100 > 0 else np.nan)
+            log_ssfr_30_samples.append(np.log10(s_sfr30 / s_mass) if s_sfr30 > 0 else np.nan)
 
         sfr_100_samples = np.array(sfr_100_samples)
         sfr_30_samples = np.array(sfr_30_samples)
-        ssfr_100_samples = np.array(ssfr_100_samples)
-        ssfr_30_samples = np.array(ssfr_30_samples)
+        log_ssfr_100_samples = np.array(log_ssfr_100_samples)
+        log_ssfr_30_samples = np.array(log_ssfr_30_samples)
+        dust2_samples = 1.086 * samples[:, dust2_idx]
 
-        # 16th, 50th (median), and 84th percentiles (1-sigma equivalent)
-        sfr_100_16, sfr_100_med, sfr_100_84 = np.percentile(sfr_100_samples, [16, 50, 84])
-        sfr_30_16,  sfr_30_med,  sfr_30_84  = np.percentile(sfr_30_samples, [16, 50, 84])
-        ssfr_100_16, ssfr_100_med, ssfr_100_84 = np.percentile(ssfr_100_samples, [16, 50, 84])
-        ssfr_30_16,  ssfr_30_med,  ssfr_30_84  = np.percentile(ssfr_30_samples, [16, 50, 84])
+        # Add derived chains
+        derived_chains = {
+            'sfr_100myr': sfr_100_samples,
+            'sfr_30myr': sfr_30_samples,
+            'log_ssfr_100myr': log_ssfr_100_samples,
+            'log_ssfr_30myr': log_ssfr_30_samples,
+            'dust2': dust2_samples,
+            'log_L_ir': log_lir_samples  # From the sample-by-sample integration loop
+        }
         
-        # Asymmetric 1-sigma uncertainties
-        sfr_100_err_low  = sfr_100_med - sfr_100_16
-        sfr_100_err_high = sfr_100_84 - sfr_100_med
-
-        sfr_30_err_low  = sfr_30_med - sfr_30_16
-        sfr_30_err_high = sfr_30_84 - sfr_30_med
-
-        ssfr_100_err_low  = ssfr_100_med - ssfr_100_16
-        ssfr_100_err_high = ssfr_100_84 - ssfr_100_med
-
-        ssfr_30_err_low  = ssfr_30_med - ssfr_30_16
-        ssfr_30_err_high = ssfr_30_84 - ssfr_30_med
+        # Add derived stats
+        derived_stats = {
+            'sfr_100myr': summarise_chain(sfr_100_samples, map_value=sfr_last100_best),
+            'sfr_30myr': summarise_chain(sfr_30_samples, map_value=sfr_last30_best),
+            'log_ssfr_100myr': summarise_chain(log_ssfr_100_samples, map_value=log_ssfr_last100_best),
+            'log_ssfr_30myr': summarise_chain(log_ssfr_30_samples, map_value=log_ssfr_last30_best),
+            'A_V': summarise_chain(dust2_samples, map_value=1.086 * dust2),
+            'log_L_ir': summarise_chain(log_lir_samples, map_value=log_lir_best)
+        }
     
         print("Extracted galaxy properties...")
         
@@ -1063,3 +1089,14 @@ def _integrate_ir_lum(spec_uJy, wave_rest_um, zred):
 
     return L_ir
     
+def summarise_chain(chain_array, map_value=np.nan):
+            """Computes 16th, 50th (median), 84th percentiles and asymmetric uncertainties."""
+            p16, p50, p84 = np.nanpercentile(chain_array, [16, 50, 84])
+            return {
+                'map': float(map_value) if np.isfinite(map_value) else np.nan,
+                'median': float(p50),
+                'p16': float(p16),
+                'p84': float(p84),
+                'err_low': float(p50 - p16),
+                'err_high': float(p84 - p50)
+            }
