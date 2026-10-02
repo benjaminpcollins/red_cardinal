@@ -28,7 +28,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
     
     Parameters:
     -----------
-    ids : list
+    galaxy_ids : list
         List of galaxy IDs to analyze
     phot_table : str
         Path to the MIRI photometry table
@@ -138,10 +138,15 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         samples = posterior_samples(results, 100)
         
         sample_specs = []
+        sample_params = []
+        
         for params_i in samples:
             spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
             sample_specs.append(spec_i)
+            sample_params.append(params_i)  # Store sample parameters for later analysis!
+        
         sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
+        sample_params = np.array(sample_params)  # shape: (nsample, nparam)
         
         # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
         lower = np.percentile(sample_specs, 16, axis=0)
@@ -1009,7 +1014,7 @@ def _load_and_extract_spectra(file_path):
 
 
 # --- Helper function for integration ---
-def _integrate_spectrum(spec_uJy, wave_rest_um, zred):
+def _integrate_ir_lum(spec_uJy, wave_rest_um, zred):
     """Integrates f_nu over rest-frame 8-1000 um and converts to L_sun."""
     # Mask rest-frame 8 to 1000 um
     mask = (wave_rest_um >= 8.0) & (wave_rest_um <= 1000.0)
@@ -1020,93 +1025,20 @@ def _integrate_spectrum(spec_uJy, wave_rest_um, zred):
     w_rest = wave_rest_um[mask] * u.um
     f_nu = spec_uJy[mask] * u.uJy
 
-    # Frequency conversion: nu = c / lambda
-    freq = (const.c / w_rest).to(u.Hz)
+    # Comnvert to rest-frame frequency in Hz
+    fq_rest = (const.c / w_rest).to(u.Hz).value
 
     # Integrate over frequency (reverse for positive dx)
     f_nu_cgs = f_nu.to(u.erg / (u.s * u.cm**2 * u.Hz)).value
-    F_ir = trapezoid(f_nu_cgs[::-1], freq.value[::-1]) * (
-        u.erg / (u.s * u.cm**2)
-    )
+    F_ir_rest = trapezoid(f_nu_cgs[::-1], fq_rest[::-1]) * (u.erg / (u.s * u.cm**2))
+
+    # Total integrated IR-flux in the observed frame
+    F_ir_obs = F_ir_rest / (1 + zred)  
 
     # Convert flux to luminosity using luminosity distance
     dL = cosmo.luminosity_distance(zred)
-    L_ir = (4 * np.pi * dL**2 * F_ir * (1 + zred)).to(u.L_sun)
+    L_ir = (4.0 * np.pi * dL**2 * F_ir_obs).to(u.L_sun)
 
     return L_ir
-
-
-# --- Main Function ---
-def get_dust_luminosity(objid, data_dir):
-    """Computes total L_IR (8-1000 um) and 16th/84th uncertainties
-
-    from Prospector dust vs no-dust fit results.
-    """
-    
-    dust_pickle_path = os.path.join(data_dir, "pickle_files", f"{objid}.pkl") 
-    nodust_pickle_path = os.path.join(data_dir, "pickle_nodust", f"{objid}.pkl") 
-    
-    # 1. Load both runs
-    dust_spec, wave_rest_um, zred, props = _load_and_extract_spectra(dust_pickle_path)
-    nodust_spec, _, _ , _ = _load_and_extract_spectra(nodust_pickle_path)
-
-    # 2. Subtract no-dust continuum from dust continuum
-    spec_ir_best   = dust_spec['best']   - nodust_spec['best']
-    spec_ir_median = dust_spec['median'] - nodust_spec['median']
-    spec_ir_16th   = dust_spec['16th']   - nodust_spec['16th']
-    spec_ir_84th   = dust_spec['84th']   - nodust_spec['84th']
-
-    # 3. Integrate components
-    L_ir_best   = _integrate_spectrum(spec_ir_best,   wave_rest_um, zred)
-    L_ir_median = _integrate_spectrum(spec_ir_median, wave_rest_um, zred)
-    L_ir_16th   = _integrate_spectrum(spec_ir_16th,   wave_rest_um, zred)
-    L_ir_84th   = _integrate_spectrum(spec_ir_84th,   wave_rest_um, zred)
-
-    # 4. Compute log values
-    log_L_best   = np.log10(L_ir_best.value)
-    log_L_median = np.log10(L_ir_median.value)
-    
-    # Calculate uncertainties relative to the MEDIAN (guaranteed positive)
-    err_low  = log_L_median - np.log10(L_ir_16th.value)
-    err_high = np.log10(L_ir_84th.value) - log_L_median
-
-    #print(f"Galaxy ID: {objid}")
-    #print(f"Log(L_IR / L_sun) = {log_L_median:.2f} (-{err_low:.2f} / +{err_high:.2f}) [Median]")
-    #print(f"Log(L_IR / L_sun) = {log_L_best:.2f} (Best-fit MAP)")
-
-    return {
-        'log_L_ir_median': log_L_median,
-        'log_L_ir_best': log_L_best,
-        'err_low_dex': err_low,
-        'err_high_dex': err_high,
-        'logmass': props['logmass'],
-        'dust': props['dust2'],
-        'sfr': props['sfr_100myr']
-    }
-    
-    
-def get_masses(objid, prosp_dir):
-    file = glob.glob(f"{prosp_dir}/*{objid}*.h5")[0]
-    results, _, _ = reader.results_from(file)
-    map_parameters = get_MAP(results)
-    
-    MAP = {}
-    for a,b in zip(results['theta_labels'], map_parameters):
-        MAP[a] = b
-        
-    mass_best = MAP['logmass']
-    mass_low = np.percentile(results['chain'][:, results['theta_labels'].index('logmass')], 16)
-    mass_median = np.percentile(results['chain'][:, results['theta_labels'].index('logmass')], 50)
-    mass_high = np.percentile(results['chain'][:, results['theta_labels'].index('logmass')], 84)
-    
-    mass_err_low = mass_median - mass_low
-    mass_err_high = mass_high - mass_median
-    
-    if mass_err_low < 0:
-        mass_err_low = 0.0
-    if mass_err_high < 0:
-        mass_err_high = 0.0
-    
-    return mass_median, mass_err_low, mass_err_high
     
     
