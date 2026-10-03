@@ -155,7 +155,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         # Compute best-fit IR luminosity
         lir_best = _integrate_ir_lum(spec, wave_spec, zred)
         log_lir_best = np.log10(lir_best) if lir_best > 0 else np.nan
-        
+                
         # ------------------------------------------------------------------
         # Section 2: Pulling weighted samples and storing the parameters
         # ------------------------------------------------------------------
@@ -193,6 +193,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         upper = np.percentile(sample_specs, 84, axis=0)
         
         if run == 'nirspec':
+            
             # Make sure to scale the spectra and photometry accordingly
             cat_path = '/Users/benjamincollins/Data/Bluejay/combined_catalog_v2.0.4.fits'
             cat_table = Table.read(cat_path)
@@ -214,10 +215,34 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             median /= slit_flux_fraction
             upper /= slit_flux_fraction
         
-        elif run == 'standard':
+        filter_dict_miri = {
+            'jwst_f770w':  'F770W',
+            'jwst_f1000w': 'F1000W',
+            'jwst_f1800w': 'F1800W',
+            'jwst_f2100w': 'F2100W'
+        }
+        
+        if run in ['standard', 'nirspec']:
             # Extend the obs dictionary with MIRI photometry for plotting
             obs_miri = update_obs_with_miri(objid, obs, phot_table)
             miri_filters = obs_miri['filters_miri']
+            miri_band_names = ['filter_code_miri']
+            
+            # Identify valid MIRI bands from the attached table
+            miri_obs_flux = []
+            miri_obs_err = []
+            
+            miri_flux_all = obs_miri['maggies_miri'] 
+            miri_err_all  = obs_miri['maggies_unc_miri']
+            
+            for filt, f_o, e_o in zip(miri_filters, miri_flux_all, miri_err_all):
+                if np.isfinite(f_o) and np.isfinite(e_o):
+                    miri_filters.append(filt)
+                    miri_obs_flux.append(f_o)
+                    miri_obs_err.append(e_o)
+            
+            miri_obs_flux = np.array(miri_obs_flux)
+            miri_obs_err  = np.array(miri_obs_err)
             
             # Get predicted photometry for MIRI bands (+ Errors)
             phot_miri = get_model_photometry(spec, wave_spec, miri_filters, zred)
@@ -229,14 +254,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
             phot_wave_all = np.array([filt.wave_effective for filt in obs_miri['filters_all']])  # in Angstroms
             phot_wave_miri = np.array([filt.wave_effective for filt in obs_miri['filters_miri']])  # in Angstroms            
-        
+            
         elif run == 'miri':
-            filter_dict_miri = {
-                'F770W':  'jwst_f770w',
-                'F1000W': 'jwst_f1000w',
-                'F1800W': 'jwst_f1800w',
-                'F2100W': 'jwst_f2100w'
-            }
             
             # 1. Initialise containers
             miri_mask = []        # Indices in the 'obs' arrays that are MIRI and not NaN
@@ -259,8 +278,13 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
                             miri_band_names.append(code)
                             miri_filters.append(filt)
                             break
+                        
+            miri_obs_flux = obs['maggies'][miri_mask]
+            miri_obs_err = obs['maggies_unc'][miri_mask]
+        
+            # Compute filter wavelength in microns
+            phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
     
-            # 3. Compute separate statistics
             # Extract only the valid MIRI data
             phot_miri = phot[miri_mask] # phot is the model photometry from model.predict
             phot_wave_miri = phot_wave[miri_mask]
@@ -270,11 +294,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             phot_miri_err = 0.5*(phot_miri_upper - phot_miri_lower)
         
         else:
-            print(f"⚠️ Warning: Unknown run type '{run}'. Defaulting to 'standard' behaviour.")
-            
-        # Drop large sample_specs array from memory
-        del sample_specs
-        
+            print(f"⚠️ Warning: Unknown run type '{run}'. Defaulting to 'standard' behaviour.")        
                     
         print("Successfully reconstructed fit...")
         
@@ -401,25 +421,20 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         # ------------------------------------------------------------------
         # Section 4: Get fit quality statistics for each band
         # ------------------------------------------------------------------
-        
-        # Safer way to ensure you align with phot_miri
-        miri_flux = obs_miri['maggies_miri'] 
-        miri_err  = obs_miri['maggies_unc_miri']
+        fit_quality = {}
         
         # Compute N_sigma
-        delta = phot_miri - miri_flux # change sign here
-        tot_err = np.sqrt(phot_miri_err**2 + miri_err**2)
+        delta = phot_miri - miri_obs_flux # change sign here
+        tot_err = np.sqrt(phot_miri_err**2 + miri_obs_err**2)
         N_sigma = delta / tot_err
         chi2_red_miri = np.sum(N_sigma**2) / len(N_sigma)
         
-        fit_quality = {}
-        
         fit_quality['chi2_red'] = chi2_red_miri
         
-        for i, band in enumerate(obs_miri['filter_code_miri']):
+        for i, band in enumerate(miri_band_names):
                         
-            f_o = miri_flux[i]
-            e_o = miri_err[i]
+            f_o = miri_obs_flux[i]
+            e_o = miri_obs_err[i]
             f_m = phot_miri[i]
             e_m = phot_miri_err[i]
             
@@ -483,7 +498,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             },
             
             # One entry for the observation dictionary
-            'obs': obs_miri,
+            'obs': obs_miri if run in ['standard', 'nirspec'] else obs,
             
             # Fit quality statistics for each MIRI band
             'fit_quality': fit_quality,
@@ -514,7 +529,10 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         print(f"💾 Saved data to {filename}")
             
         if plot_dir:
-            plot_reconstructed_fit(filename, plot_dir)
+            if run == 'miri':
+                plot_miri_fit(filename, plot_dir)
+            else:
+                plot_reconstructed_fit(filename, plot_dir)
     
     return 
 
@@ -572,7 +590,7 @@ def _integrate_ir_lum(spec_uJy, wave_rest_um, zred):
     dL = cosmo.luminosity_distance(zred)
     L_ir = (4.0 * np.pi * dL**2 * F_ir_obs).to(u.L_sun)
 
-    return L_ir
+    return L_ir.value  # Return as a float in L_sun
     
 def summarise_chain(chain_array, map_value=np.nan):
             """Computes 16th, 50th (median), 84th percentiles and asymmetric uncertainties."""
