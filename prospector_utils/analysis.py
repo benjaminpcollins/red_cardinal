@@ -24,7 +24,7 @@ from .plotting import *
 
 
 def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None, 
-                 add_duste=True, n_samples=100, run='standard'):
+                 add_duste=True, n_samples=100, run='standard', overwrite=False):
     """Main function to reconstruct and plot PROSPECTOR results with MIRI data
     
     Parameters:
@@ -44,7 +44,9 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
     n_samples : int, optional
         Number of posterior samples to draw for uncertainty estimation
     run : str, optional
-        valid run arguments are 'standard', 'nirspec' or 'miri'
+        Accepted run arguments are 'standard' or 'nirspec'
+    overwrite : bool, optional
+        Whether to overwrite existing pickle files in stats_dir
     """
 
     print(f"Analysing fits of {len(galaxy_ids)} galaxies...\n")
@@ -57,9 +59,12 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         
         filename = os.path.join(stats_dir, f"{objid}.pkl")
         
-        if os.path.exists(filename):
+        if os.path.exists(filename) and not overwrite:
             print(f"Skipping galaxy {objid} - output file already exists!")
             continue
+        
+        elif os.path.exists(filename) and overwrite:
+            print(f"Overwriting existing output for galaxy {objid}...")
         
         print(f"============ Processing galaxy {objid} ================")
         
@@ -118,9 +123,10 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             obs['logify_spectrum'] = False
 
         elif model == None:
+            print("⚠️ Warning: No model found in the results. Rebuilding the model from parameters...")
             model = dict(results['model_params'][0])
             model = PolySpecModel(model)  
-                    
+            
         # Decide on whether to include dust emission or not
         if add_duste:
             # Obtain best fit model spectrum and model photometry    
@@ -148,48 +154,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         # Convert to arrays
         phot = np.array(phot)
         
-        # Compute best-fit IR luminosity
-        lir_best = _integrate_ir_lum(spec, wave_spec, zred)
-        log_lir_best = np.log10(lir_best) if lir_best > 0 else np.nan
-                
-        # ------------------------------------------------------------------
-        # Section 2: Pulling weighted samples and storing the parameters
-        # ------------------------------------------------------------------
-        
-        # Draw weighted posterior samples
-        samples = posterior_samples(results, n_samples)
-        theta_names = list(results['theta_labels'])
-        
-        sample_specs = []
-        lir_samples = []
-        
-        for params_i in samples:
-            spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
-            sample_specs.append(spec_i)
-            
-            # Integrate L_IR for each individual sample spectra
-            lir_i = _integrate_ir_lum(spec_i, wave_spec, zred)
-            lir_samples.append(lir_i)
-        
-        sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
-        lir_samples = np.array(lir_samples)  # shape: (nsample,)
-        
-        # Compute log10(L_IR) for valid samples (L_IR > 0)
-        valid_lir = lir_samples > 0
-        log_lir_samples = np.full(n_samples, np.nan)
-        log_lir_samples[valid_lir] = np.log10(lir_samples[valid_lir])
-        
-        lir_16, lir_med, lir_84 = np.nanpercentile(log_lir_samples, [16, 50, 84])
-        lir_err_low = lir_med - lir_16
-        lir_err_high = lir_84 - lir_med
-
-        # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
-        lower = np.percentile(sample_specs, 16, axis=0)
-        median = np.percentile(sample_specs, 50, axis=0)
-        upper = np.percentile(sample_specs, 84, axis=0)
-        
+        # Make sure everything is scaled properly for NIRSpec if needed
         if run == 'nirspec':
-            
             # Make sure to scale the spectra and photometry accordingly
             cat_path = '/Users/benjamincollins/Data/Bluejay/combined_catalog_v2.0.4.fits'
             cat_table = Table.read(cat_path)
@@ -197,7 +163,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             mask = cat_table['ID'] == objid
             result = cat_table['slit_flux_fraction_F444W'][mask]
             slit_flux_fraction = result.value[0]
-            
+        
             # Scale photometry
             phot /= slit_flux_fraction
             obs['maggies'] /= slit_flux_fraction
@@ -205,96 +171,81 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             
             # Scale spectroscopy
             spec /= slit_flux_fraction
-            sample_specs /= slit_flux_fraction
-            
-            lower /= slit_flux_fraction
-            median /= slit_flux_fraction
-            upper /= slit_flux_fraction
         
-        filter_dict_miri = {
-            'jwst_f770w':  'F770W',
-            'jwst_f1000w': 'F1000W',
-            'jwst_f1800w': 'F1800W',
-            'jwst_f2100w': 'F2100W'
-        }
-        
-        if run in ['standard', 'nirspec']:
-            # Extend the obs dictionary with MIRI photometry for plotting
-            obs_miri = update_obs_with_miri(objid, obs, phot_table)
-            miri_filters = obs_miri['filters_miri']
-            miri_band_names = obs_miri['filter_code_miri']
-            
-            # Identify valid MIRI bands from the attached table
-            miri_obs_flux = []
-            miri_obs_err  = []
-            
-            miri_flux_all = obs_miri['maggies_miri'] 
-            miri_err_all  = obs_miri['maggies_unc_miri']
-            
-            for filt, f_o, e_o in zip(miri_filters, miri_flux_all, miri_err_all):
-                if np.isfinite(f_o) and np.isfinite(e_o) and (f_o > 0) and (e_o > 0):
-                    miri_obs_flux.append(f_o)
-                    miri_obs_err.append(e_o)
-            
-            miri_obs_flux = np.array(miri_obs_flux)
-            miri_obs_err  = np.array(miri_obs_err)
-            
-            # Get predicted photometry for MIRI bands (+ Errors)
-            phot_miri       = get_model_photometry(spec, wave_spec, miri_filters, zred)
-            phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
-            phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
-            phot_miri_err   = 0.5*(phot_miri_upper - phot_miri_lower)
-            
-            # Compute filter wavelength in microns
-            phot_wave      = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
-            phot_wave_miri = np.array([filt.wave_effective for filt in obs_miri['filters_miri']])  # in Angstroms            
-            
-        elif run == 'miri':
-            
-            # 1. Initialise containers
-            miri_filters    = []
-            miri_band_names = []
-            miri_obs_flux   = []
-            miri_obs_err    = []
-            phot_miri       = []
-            phot_wave_miri  = []
-    
-            # 2. Iterate and Filter
-            for i, filt in enumerate(obs['filters']):
-                # Check for NaN first to clean the entire analysis
-                if np.isnan(obs['maggies'][i]):
-                    continue
+        # Compute best-fit IR luminosity (scaled if NIRSpec)
+        lir_best = _integrate_ir_lum(spec, wave_spec, zred)
+        log_lir_best = np.log10(lir_best) if lir_best > 0 else np.nan
                 
-                fname = filt.name.lower().strip()
-                if fname in filter_dict_miri:
-                    f_val = obs['maggies'][i]
-                    e_val = obs['maggies_unc'][i]
-                    
-                    # Strictly require valid, positive detections
-                    if np.isfinite(f_val) and np.isfinite(e_val) and (f_val > 0) and (e_val > 0):
-                        miri_filters.append(filt)
-                        miri_band_names.append(filter_dict_miri[fname])
-                        miri_obs_flux.append(f_val)
-                        miri_obs_err.append(e_val)
-                        
-                        # Extract the exact corresponding predicted model flux from MAP predict
-                        phot_miri.append(phot[i])
-                        phot_wave_miri.append(filt.wave_effective)
-                    
-            miri_obs_flux  = np.array(miri_obs_flux)
-            miri_obs_err   = np.array(miri_obs_err)
-            phot_miri      = np.array(phot_miri)
-            phot_wave_miri = np.array(phot_wave_miri)
-                    
-            # Compute filter wavelength in microns
-            phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
-            
-            phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
-            phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
-            phot_miri_err   = 0.5*(phot_miri_upper - phot_miri_lower)
+        sample_specs = []
+        phot_miri_samples = []
+        lir_samples = []
         
-        else:
-            print(f"⚠️ Warning: Unknown run type '{run}'. Defaulting to 'standard' behaviour.")        
+        # Extend the obs dictionary with MIRI photometry for plotting
+        obs_miri = update_obs_with_miri(objid, obs, phot_table)
+        filters = obs['filters']
+        miri_filters = obs_miri['filters_miri']
+        miri_band_names = obs_miri['filter_code_miri']
+        
+        # Draw weighted posterior samples
+        samples = posterior_samples(results, n_samples)
+        theta_names = list(results['theta_labels'])
+        
+        for params_i in samples:
+            spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
+            if run == 'nirspec':
+                spec_i /= slit_flux_fraction
+            sample_specs.append(spec_i)
+            
+            # Integrate L_IR for each individual sample spectra
+            lir_i = _integrate_ir_lum(spec_i, wave_spec, zred)
+            lir_samples.append(lir_i)
+            
+            # Compute predicted photometry for MIRI bands for each sample
+            phot_i = get_model_photometry(spec_i, wave_spec, miri_filters, zred)
+            phot_miri_samples.append(phot_i)
+        
+        sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
+        lir_samples = np.array(lir_samples)  # shape: (nsample,)
+                
+        # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
+        lower = np.percentile(sample_specs, 16, axis=0)
+        median = np.percentile(sample_specs, 50, axis=0)
+        upper = np.percentile(sample_specs, 84, axis=0)    
+        
+        # Identify valid MIRI bands from the attached table
+        miri_obs_flux = []
+        miri_obs_err  = []
+        
+        miri_flux_all = obs_miri['maggies_miri'] 
+        miri_err_all  = obs_miri['maggies_unc_miri']
+        
+        for f_o, e_o in zip(miri_flux_all, miri_err_all):
+            if np.isfinite(f_o) and np.isfinite(e_o) and (f_o > 0) and (e_o > 0):
+                miri_obs_flux.append(f_o)
+                miri_obs_err.append(e_o)
+        
+        miri_obs_flux = np.array(miri_obs_flux)
+        miri_obs_err  = np.array(miri_obs_err)
+        
+        # Compute filter wavelength in microns
+        phot_wave      = np.array([filt.wave_effective for filt in filters])  # in Angstroms
+        phot_wave_miri = np.array([filt.wave_effective for filt in miri_filters])  # in Angstroms            
+        
+        # ------------------------------------------------------------------
+        # Section 2: Pulling weighted samples and storing the parameters
+        # ------------------------------------------------------------------
+        
+        # Compute log10(L_IR) for valid samples (L_IR > 0)
+        valid_lir = lir_samples > 0
+        log_lir_samples = np.full(n_samples, np.nan)
+        log_lir_samples[valid_lir] = np.log10(lir_samples[valid_lir])
+        
+        # Get predicted photometry for MIRI bands + errors from the posterior samples
+        phot_miri_best   = get_model_photometry(spec, wave_spec, miri_filters, zred)
+        phot_miri_med = np.nanpercentile(phot_miri_samples, 50, axis=0)
+        phot_miri_16 = np.nanpercentile(phot_miri_samples, 16, axis=0)
+        phot_miri_84 = np.nanpercentile(phot_miri_samples, 84, axis=0)
+        phot_miri_err   = 0.5*(phot_miri_84 - phot_miri_16)          
                     
         print("Successfully reconstructed fit...")
         
@@ -327,15 +278,15 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         overlap30 = np.maximum(0.0, np.minimum(bin_edges[:,1], t30) - np.minimum(bin_edges[:,0], t30))
         
         # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
-        mass_in_last_100 = np.sum(sfrs * overlap100)
-        sfr_last100_best = mass_in_last_100 / t100
-        mass_in_last_30 = np.sum(sfrs * overlap30)
-        sfr_last30_best = mass_in_last_30 / t30
+        sfr_100_best = np.sum(sfrs * overlap100) / t100
+        sfr_30_best = np.sum(sfrs * overlap30) / t30
         
-        # Compute specific SFR (sSFR) in units of yr^-1
-        map_mass_linear = 10.0**logmass
-        log_ssfr_last100_best = np.log10(sfr_last100_best / map_mass_linear) if sfr_last100_best > 0 else np.nan
-        log_ssfr_last30_best  = np.log10(sfr_last30_best  / map_mass_linear) if sfr_last30_best > 0 else np.nan
+        # Convert to log10(SFR)
+        log_sfr_100_best = np.log10(sfr_100_best) if sfr_100_best > 0 else np.nan
+        log_sfr_30_best  = np.log10(sfr_30_best)  if sfr_30_best  > 0 else np.nan
+
+        log_ssfr_100_best = log_sfr_100_best - logmass if np.isfinite(log_sfr_100_best) else np.nan
+        log_ssfr_30_best  = log_sfr_30_best  - logmass if np.isfinite(log_sfr_30_best)  else np.nan
         
         # ----------------------------------------------------------------------
         # Compute SFR distribution across posterior samples
@@ -354,12 +305,14 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             chain = samples[:, idx]
             map_val = MAP.get(param_name, np.nan)
             
+            if np.isnan(map_val):
+                print(f"⚠️ Warning: MAP value for parameter '{param_name}' is NaN. Check the results.")
+            
             # Save the 1D sample vector (shape: n_samples,)
             param_chains[param_name] = chain
             
             # Save quantiles, uncertainties, and MAP estimate
             fit_params_stats[param_name] = summarise_chain(chain, map_value=map_val)
-        
         
         logmass_idx = theta_names.index('logmass')
         dust2_idx = theta_names.index('dust2')
@@ -368,50 +321,63 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             if name.startswith('logsfr_ratios_')
         ]
 
-        sfr_100_samples = []
-        sfr_30_samples = []
+        log_sfr_100_samples = []
+        log_sfr_30_samples = []
+        
         log_ssfr_100_samples = []
         log_ssfr_30_samples = []
+        
         dust2_samples = []
 
         for s_params in samples:
             s_logm = s_params[logmass_idx]
             s_r = s_params[ratio_indices]
-            
+                        
+            # Get SFRs for each sample using the same age bins
             s_bins = logsfr_ratios_to_sfrs(s_logm, s_r, agebins)
-            s_sfr100 = np.sum(s_bins * overlap100) / t100
-            s_sfr30  = np.sum(s_bins * overlap30) / t30
+            s_sfr_100 = np.sum(s_bins * overlap100) / t100
+            s_sfr_30  = np.sum(s_bins * overlap30) / t30
             
-            s_mass = 10.0**s_logm
-            sfr_100_samples.append(s_sfr100)
-            sfr_30_samples.append(s_sfr30)
-            log_ssfr_100_samples.append(np.log10(s_sfr100 / s_mass) if s_sfr100 > 0 else np.nan)
-            log_ssfr_30_samples.append(np.log10(s_sfr30 / s_mass) if s_sfr30 > 0 else np.nan)
+            s_log_sfr_100 = np.log10(s_sfr_100) if s_sfr_100 > 0 else np.nan
+            s_log_sfr_30  = np.log10(s_sfr_30)  if s_sfr_30  > 0 else np.nan
+            
+            log_sfr_100_samples.append(s_log_sfr_100)
+            log_sfr_30_samples.append(s_log_sfr_30)
 
-        sfr_100_samples = np.array(sfr_100_samples)
-        sfr_30_samples = np.array(sfr_30_samples)
+            # Specific starformation rate (sSFR) = SFR / stellar mass
+            s_log_ssfr_100 = s_log_sfr_100 - s_logm if np.isfinite(s_log_sfr_100) else np.nan
+            s_log_ssfr_30 = s_log_sfr_30 - s_logm if np.isfinite(s_log_sfr_30) else np.nan
+            
+            log_ssfr_100_samples.append(s_log_ssfr_100)
+            log_ssfr_30_samples.append(s_log_ssfr_30)
+            
+        log_sfr_100_samples = np.array(log_sfr_100_samples)
+        log_sfr_30_samples = np.array(log_sfr_30_samples)
+        
         log_ssfr_100_samples = np.array(log_ssfr_100_samples)
         log_ssfr_30_samples = np.array(log_ssfr_30_samples)
+        
+        # Convert dust2 to A_V
         dust2_samples = 1.086 * samples[:, dust2_idx]
 
         # Add derived chains
         derived_chains = {
-            'sfr_100myr': sfr_100_samples,
-            'sfr_30myr': sfr_30_samples,
+            'log_sfr_100myr':  log_sfr_100_samples,
+            'log_sfr_30myr':   log_sfr_30_samples,
             'log_ssfr_100myr': log_ssfr_100_samples,
-            'log_ssfr_30myr': log_ssfr_30_samples,
-            'dust2': dust2_samples,
-            'log_L_ir': log_lir_samples  # From the sample-by-sample integration loop
+            'log_ssfr_30myr':  log_ssfr_30_samples,
+            'A_V':             dust2_samples,
+            'log_L_ir':        log_lir_samples  # From the sample-by-sample integration loop
         }
         
         # Add derived stats including percentiles
         derived_stats = {
-            'sfr_100myr': summarise_chain(sfr_100_samples, map_value=sfr_last100_best),
-            'sfr_30myr': summarise_chain(sfr_30_samples, map_value=sfr_last30_best),
-            'log_ssfr_100myr': summarise_chain(log_ssfr_100_samples, map_value=log_ssfr_last100_best),
-            'log_ssfr_30myr': summarise_chain(log_ssfr_30_samples, map_value=log_ssfr_last30_best),
-            'A_V': summarise_chain(dust2_samples, map_value=1.086 * dust2),
-            'log_L_ir': summarise_chain(log_lir_samples, map_value=log_lir_best)
+            'log_sfr_100myr':  summarise_chain(log_sfr_100_samples, map_value=log_sfr_100_best),
+            'log_sfr_30myr':   summarise_chain(log_sfr_30_samples, map_value=log_sfr_30_best),
+            'log_ssfr_100myr': summarise_chain(log_ssfr_100_samples, map_value=log_ssfr_100_best),
+            'log_ssfr_30myr':  summarise_chain(log_ssfr_30_samples, map_value=log_ssfr_30_best),
+            'A_V':             summarise_chain(dust2_samples, map_value=1.086 * dust2),
+            'log_L_ir':        summarise_chain(log_lir_samples, map_value=log_lir_best)
         }
     
         print("Extracted galaxy properties...")
@@ -422,7 +388,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         fit_quality = {}
         
         # Compute N_sigma
-        delta = phot_miri - miri_obs_flux # change sign here
+        delta = phot_miri_med - miri_obs_flux # change sign here
         tot_err = np.sqrt(phot_miri_err**2 + miri_obs_err**2)
         
         # Compute N_sigma only for valid errors to avoid division by zero
@@ -438,7 +404,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
                         
             f_o = miri_obs_flux[i]
             e_o = miri_obs_err[i]
-            f_m = phot_miri[i]
+            f_m = phot_miri_med[i]
             e_m = phot_miri_err[i]
             
             snr = (f_o / e_o) if e_o > 0 else 0
@@ -495,13 +461,16 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
                 'sample_specs': sample_specs[:10],
                 'phot': phot,
                 'phot_wave': phot_wave,
-                'phot_miri': phot_miri,
+                'phot_miri_best': phot_miri_best,
+                'phot_miri_med': phot_miri_med,
+                'phot_miri_16': phot_miri_16,
+                'phot_miri_84': phot_miri_84,
                 'phot_miri_err': phot_miri_err,
                 'phot_wave_miri': phot_wave_miri
             },
             
             # One entry for the observation dictionary
-            'obs': obs_miri if run in ['standard', 'nirspec'] else obs,
+            'obs': obs_miri,
             
             # Fit quality statistics for each MIRI band
             'fit_quality': fit_quality,
@@ -532,10 +501,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         print(f"💾 Saved data to {filename}")
             
         if plot_dir:
-            if run == 'miri':
-                plot_miri_fit(filename, plot_dir)
-            else:
-                plot_reconstructed_fit(filename, plot_dir)
+            plot_reconstructed_fit(filename, plot_dir)
     
     return 
 
@@ -596,13 +562,69 @@ def _integrate_ir_lum(spec_uJy, wave_rest_um, zred):
     return L_ir.value  # Return as a float in L_sun
     
 def summarise_chain(chain_array, map_value=np.nan):
-            """Computes 16th, 50th (median), 84th percentiles and asymmetric uncertainties."""
-            p16, p50, p84 = np.nanpercentile(chain_array, [16, 50, 84])
-            return {
-                'map': float(map_value) if np.isfinite(map_value) else np.nan,
-                'median': float(p50),
-                'p16': float(p16),
-                'p84': float(p84),
-                'err_low': float(p50 - p16),
-                'err_high': float(p84 - p50)
-            }
+    """Computes 16th, 50th (median), 84th percentiles and asymmetric uncertainties."""
+    p16, p50, p84 = np.nanpercentile(chain_array, [16, 50, 84])
+    return {
+        'map': float(map_value) if np.isfinite(map_value) else np.nan,
+        'median': float(p50),
+        'p16': float(p16),
+        'p84': float(p84),
+        'err_low': float(p50 - p16),
+        'err_high': float(p84 - p50)
+    }
+            
+            
+            
+            
+    """
+    
+    
+    elif run == 'miri':
+                
+                # 1. Initialise containers
+                miri_filters    = []
+                miri_band_names = []
+                miri_obs_flux   = []
+                miri_obs_err    = []
+                phot_miri       = []
+                phot_wave_miri  = []
+        
+                # 2. Iterate and Filter
+                for i, filt in enumerate(obs['filters']):
+                    # Check for NaN first to clean the entire analysis
+                    if np.isnan(obs['maggies'][i]):
+                        continue
+                    
+                    fname = filt.name.lower().strip()
+                    if fname in filter_dict_miri:
+                        f_val = obs['maggies'][i]
+                        e_val = obs['maggies_unc'][i]
+                        
+                        # Strictly require valid, positive detections
+                        if np.isfinite(f_val) and np.isfinite(e_val) and (f_val > 0) and (e_val > 0):
+                            miri_filters.append(filt)
+                            miri_band_names.append(filter_dict_miri[fname])
+                            miri_obs_flux.append(f_val)
+                            miri_obs_err.append(e_val)
+                            
+                            # Extract the exact corresponding predicted model flux from MAP predict
+                            phot_miri.append(phot[i])
+                            phot_wave_miri.append(filt.wave_effective)
+                        
+                miri_obs_flux  = np.array(miri_obs_flux)
+                miri_obs_err   = np.array(miri_obs_err)
+                phot_miri      = np.array(phot_miri)
+                phot_wave_miri = np.array(phot_wave_miri)
+                        
+                # Compute filter wavelength in microns
+                phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
+                
+                phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
+                phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
+                phot_miri_err   = 0.5*(phot_miri_upper - phot_miri_lower)
+            
+            else:
+                print(f"⚠️ Warning: Unknown run type '{run}'. Defaulting to 'standard' behaviour.")  
+    
+    
+    """
