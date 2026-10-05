@@ -61,6 +61,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         
         if os.path.exists(filename) and not overwrite:
             print(f"Skipping galaxy {objid} - output file already exists!")
+            if plot_dir:
+                        plot_reconstructed_fit(filename, plot_dir)
             continue
         
         elif os.path.exists(filename) and overwrite:
@@ -220,9 +222,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         miri_err_all  = obs_miri['maggies_unc_miri']
         
         for f_o, e_o in zip(miri_flux_all, miri_err_all):
-            if np.isfinite(f_o) and np.isfinite(e_o) and (f_o > 0) and (e_o > 0):
-                miri_obs_flux.append(f_o)
-                miri_obs_err.append(e_o)
+            miri_obs_flux.append(f_o)
+            miri_obs_err.append(e_o)
         
         miri_obs_flux = np.array(miri_obs_flux)
         miri_obs_err  = np.array(miri_obs_err)
@@ -404,8 +405,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
                         
             f_o = miri_obs_flux[i]
             e_o = miri_obs_err[i]
-            f_m = phot_miri_med[i]
-            f_n = phot_miri_best[i]
+            f_m = phot_miri_best[i] # Use best-fit model flux for comparison
+            f_n = phot_miri_med[i]
             e_m = phot_miri_err[i]
             
             snr = (f_o / e_o) if e_o > 0 else 0
@@ -428,8 +429,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
                 'zred': zred,
                 'obs_flux': f_o * maggies_to_muJy,
                 'obs_err': e_o * maggies_to_muJy,
-                'mod_flux_med': f_m * maggies_to_muJy,
-                'mod_flux_best': f_n * maggies_to_muJy,
+                'mod_flux_best': f_m * maggies_to_muJy,
+                'mod_flux_med': f_n * maggies_to_muJy,
                 'mod_err': e_m * maggies_to_muJy,
                 'n_sigma': N_sigma[i],
                 'ratio': ratio,
@@ -539,6 +540,8 @@ def analyse_fits_with_miri(galaxy_ids, data_dir, plot_dir=None, stats_dir=None,
         
         if os.path.exists(filename) and not overwrite:
             print(f"Skipping galaxy {objid} - output file already exists!")
+            if plot_dir:
+                plot_miri_fit(filename, plot_dir)
             continue
         
         elif os.path.exists(filename) and overwrite:
@@ -869,8 +872,8 @@ def analyse_fits_with_miri(galaxy_ids, data_dir, plot_dir=None, stats_dir=None,
                         
             f_o = miri_obs_flux[i]
             e_o = miri_obs_err[i]
-            f_m = phot_miri_med[i]
-            f_n = phot_miri_best[i]
+            f_m = phot_miri_best[i] # Use best-fit model flux for comparison
+            f_n = phot_miri_med[i]
             e_m = phot_miri_err[i]
             
             snr = (f_o / e_o) if e_o > 0 else 0
@@ -893,8 +896,8 @@ def analyse_fits_with_miri(galaxy_ids, data_dir, plot_dir=None, stats_dir=None,
                 'zred': zred,
                 'obs_flux': f_o * maggies_to_muJy,
                 'obs_err': e_o * maggies_to_muJy,
-                'mod_flux_med': f_m * maggies_to_muJy,
-                'mod_flux_best': f_n * maggies_to_muJy,
+                'mod_flux_best': f_m * maggies_to_muJy,
+                'mod_flux_med': f_n * maggies_to_muJy,
                 'mod_err': e_m * maggies_to_muJy,
                 'n_sigma': N_sigma[i],
                 'ratio': ratio,
