@@ -80,10 +80,6 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         full_path = os.path.join(data_dir, h5_file)
         results, obs, model = reader.results_from(full_path)
         
-        
-        #print(obs['filters'])
-        #return
-        
         # Now we have to exclude the last 3 parameters from the fit
         map_parameters = get_MAP(results)
         
@@ -226,18 +222,17 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             # Extend the obs dictionary with MIRI photometry for plotting
             obs_miri = update_obs_with_miri(objid, obs, phot_table)
             miri_filters = obs_miri['filters_miri']
-            miri_band_names = ['filter_code_miri']
+            miri_band_names = obs_miri['filter_code_miri']
             
             # Identify valid MIRI bands from the attached table
             miri_obs_flux = []
-            miri_obs_err = []
+            miri_obs_err  = []
             
             miri_flux_all = obs_miri['maggies_miri'] 
             miri_err_all  = obs_miri['maggies_unc_miri']
             
             for filt, f_o, e_o in zip(miri_filters, miri_flux_all, miri_err_all):
-                if np.isfinite(f_o) and np.isfinite(e_o):
-                    miri_filters.append(filt)
+                if np.isfinite(f_o) and np.isfinite(e_o) and (f_o > 0) and (e_o > 0):
                     miri_obs_flux.append(f_o)
                     miri_obs_err.append(e_o)
             
@@ -245,53 +240,58 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             miri_obs_err  = np.array(miri_obs_err)
             
             # Get predicted photometry for MIRI bands (+ Errors)
-            phot_miri = get_model_photometry(spec, wave_spec, miri_filters, zred)
+            phot_miri       = get_model_photometry(spec, wave_spec, miri_filters, zred)
             phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
             phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
-            phot_miri_err = 0.5*(phot_miri_upper - phot_miri_lower)
+            phot_miri_err   = 0.5*(phot_miri_upper - phot_miri_lower)
             
             # Compute filter wavelength in microns
-            phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
-            phot_wave_all = np.array([filt.wave_effective for filt in obs_miri['filters_all']])  # in Angstroms
+            phot_wave      = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
             phot_wave_miri = np.array([filt.wave_effective for filt in obs_miri['filters_miri']])  # in Angstroms            
             
         elif run == 'miri':
             
             # 1. Initialise containers
-            miri_mask = []        # Indices in the 'obs' arrays that are MIRI and not NaN
-            miri_band_names = []  # To keep track of which specific band is at which index
-            miri_filters = []
+            miri_filters    = []
+            miri_band_names = []
+            miri_obs_flux   = []
+            miri_obs_err    = []
+            phot_miri       = []
+            phot_wave_miri  = []
     
             # 2. Iterate and Filter
             for i, filt in enumerate(obs['filters']):
                 # Check for NaN first to clean the entire analysis
                 if np.isnan(obs['maggies'][i]):
                     continue
+                
+                fname = filt.name.lower().strip()
+                if fname in filter_dict_miri:
+                    f_val = obs['maggies'][i]
+                    e_val = obs['maggies_unc'][i]
                     
-                # Check if this filter is in our MIRI dictionary
-                if filt.name in filter_dict_miri.values():
-                    miri_mask.append(i)
-                    
-                    # Map back to the short name (F770W, etc.) for your stats dict
-                    for code, sedpy_name in filter_dict_miri.items():
-                        if sedpy_name == filt.name:
-                            miri_band_names.append(code)
-                            miri_filters.append(filt)
-                            break
+                    # Strictly require valid, positive detections
+                    if np.isfinite(f_val) and np.isfinite(e_val) and (f_val > 0) and (e_val > 0):
+                        miri_filters.append(filt)
+                        miri_band_names.append(filter_dict_miri[fname])
+                        miri_obs_flux.append(f_val)
+                        miri_obs_err.append(e_val)
                         
-            miri_obs_flux = obs['maggies'][miri_mask]
-            miri_obs_err = obs['maggies_unc'][miri_mask]
-        
+                        # Extract the exact corresponding predicted model flux from MAP predict
+                        phot_miri.append(phot[i])
+                        phot_wave_miri.append(filt.wave_effective)
+                    
+            miri_obs_flux  = np.array(miri_obs_flux)
+            miri_obs_err   = np.array(miri_obs_err)
+            phot_miri      = np.array(phot_miri)
+            phot_wave_miri = np.array(phot_wave_miri)
+                    
             # Compute filter wavelength in microns
             phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
-    
-            # Extract only the valid MIRI data
-            phot_miri = phot[miri_mask] # phot is the model photometry from model.predict
-            phot_wave_miri = phot_wave[miri_mask]
             
             phot_miri_upper = get_model_photometry(upper, wave_spec, miri_filters, zred)
             phot_miri_lower = get_model_photometry(lower, wave_spec, miri_filters, zred)
-            phot_miri_err = 0.5*(phot_miri_upper - phot_miri_lower)
+            phot_miri_err   = 0.5*(phot_miri_upper - phot_miri_lower)
         
         else:
             print(f"⚠️ Warning: Unknown run type '{run}'. Defaulting to 'standard' behaviour.")        
@@ -329,20 +329,17 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
         mass_in_last_100 = np.sum(sfrs * overlap100)
         sfr_last100_best = mass_in_last_100 / t100
-        log_ssfr_last100_best = np.log10(sfr_last100_best / logmass)
-
         mass_in_last_30 = np.sum(sfrs * overlap30)
         sfr_last30_best = mass_in_last_30 / t30
-        log_ssfr_last30_best = np.log10(sfr_last30_best / logmass)
+        
+        # Compute specific SFR (sSFR) in units of yr^-1
+        map_mass_linear = 10.0**logmass
+        log_ssfr_last100_best = np.log10(sfr_last100_best / map_mass_linear) if sfr_last100_best > 0 else np.nan
+        log_ssfr_last30_best  = np.log10(sfr_last30_best  / map_mass_linear) if sfr_last30_best > 0 else np.nan
         
         # ----------------------------------------------------------------------
         # Compute SFR distribution across posterior samples
         # ----------------------------------------------------------------------
-        sfr_100_samples = []
-        ssfr_100_samples = []
-        sfr_30_samples = []
-        ssfr_30_samples = []
-        dust2_samples = []
         
         # Map theta indices for fast lookup
         theta_names = results['theta_labels']
@@ -375,6 +372,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         sfr_30_samples = []
         log_ssfr_100_samples = []
         log_ssfr_30_samples = []
+        dust2_samples = []
 
         for s_params in samples:
             s_logm = s_params[logmass_idx]
@@ -426,9 +424,14 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         # Compute N_sigma
         delta = phot_miri - miri_obs_flux # change sign here
         tot_err = np.sqrt(phot_miri_err**2 + miri_obs_err**2)
-        N_sigma = delta / tot_err
-        chi2_red_miri = np.sum(N_sigma**2) / len(N_sigma)
         
+        # Compute N_sigma only for valid errors to avoid division by zero
+        valid_err = tot_err > 0
+        N_sigma = np.full_like(delta, np.nan)
+        N_sigma[valid_err] = delta[valid_err] / tot_err[valid_err]
+        
+        # Compute reduced chi-squared for MIRI bands
+        chi2_red_miri = np.nanmean(N_sigma**2) if np.any(np.isfinite(N_sigma)) else np.nan        
         fit_quality['chi2_red'] = chi2_red_miri
         
         for i, band in enumerate(miri_band_names):
