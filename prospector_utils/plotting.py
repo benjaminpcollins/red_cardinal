@@ -36,14 +36,16 @@ def plot_photometry(ax, obs, factor=3631e6):
     
     # Define the style per instrument
     instrument_styles = {
-        'acs':     {'color': 'royalblue',   'marker': 'o', 'edgecolor': 'black', 'label': 'HST ACS', 'ms': 10},
-        'wfc3':    {'color': 'limegreen',  'marker': 'o', 'edgecolor': 'black', 'label': 'HST WFC3', 'ms': 10},
-        'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST NIRCam', 'ms': 10},
-        'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST MIRI (not used in fit)', 'ms': 10}
+        'acs':     {'color': 'royalblue',   'marker': 'o', 'edgecolor': 'black', 'label': 'HST/ACS', 'ms': 10},
+        'wfc3':    {'color': 'limegreen',  'marker': 'o', 'edgecolor': 'black', 'label': 'HST/WFC3', 'ms': 10},
+        'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST/NIRCam', 'ms': 10},
+        'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST/MIRI (not used in fit)', 'ms': 10}
     }
     
     # Get current labels to prevent duplicates
     _, labels = ax.get_legend_handles_labels()
+    
+    obs_phot = []
     
     for i, filt in enumerate(obs['filters_all']):
         
@@ -87,7 +89,10 @@ def plot_photometry(ax, obs, factor=3631e6):
         # Update labels list to prevent duplicates in current loop
         if style['label'] not in labels:
             labels.append(style['label'])
-
+        
+        obs_phot.append(flux)
+        
+    return obs_phot
 
 def plot_reconstructed_fit(filename, plot_dir=None):
     
@@ -109,7 +114,7 @@ def plot_reconstructed_fit(filename, plot_dir=None):
     wave_spec = model['wave_spec']
     sample_specs = model['sample_specs']
     phot = model['phot']
-    phot_miri = model['phot_miri']
+    phot_miri = model['phot_miri_med']
     phot_miri_err = model['phot_miri_err']
     phot_wave = model['phot_wave']
     phot_wave_miri = model['phot_wave_miri']
@@ -150,12 +155,12 @@ def plot_reconstructed_fit(filename, plot_dir=None):
     #########    PLOT MODEL PHOTOMETRY     #########
     
     ax.plot(phot_wave_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
-    ax.errorbar(phot_wave_miri_microns, phot_miri_scaled, yerr=phot_miri_err_scaled, fmt='d', markersize=6, color='blue')
+    ax.errorbar(phot_wave_miri_microns, phot_miri_scaled, yerr=phot_miri_err_scaled, fmt='d', markersize=6, color='black')
     #ax.plot(phot_wave_miri_microns, phot_miri_scaled, 'd', markersize=6, color='black')
     
     #########  PLOT MEASURED PHOTOMETRY    #########
 
-    plot_photometry(ax, obs)
+    obs_phot = plot_photometry(ax, obs)
     
     # Compute bounds
     wave_mask = (wave_spec_rs >= 0.4) & (wave_spec_rs <= 35)
@@ -166,7 +171,10 @@ def plot_reconstructed_fit(filename, plot_dir=None):
 
     # Compute y-axis limits
     ymin = np.nanmin(spec_within)
-    ymax = np.nanmax(spec_within)
+    ymax_spec = np.nanmax(spec_within)
+    ymax_phot = np.nanmax(obs_phot)
+    
+    ymax = np.maximum(ymax_spec, ymax_phot)
     
     # Add margin proportionally, protecting against log-scale issues
     ymin_plot = ymin * 0.2  # reduce, but stay > 0
@@ -176,22 +184,26 @@ def plot_reconstructed_fit(filename, plot_dir=None):
     ax.set_ylim(ymin_plot, ymax_plot)
 
     # Plot formatting
-    ax.set_xlabel('Observed Wavelength [µm]', fontsize=13)
-    ax.set_ylabel('Flux [µJy]', fontsize=13)
+    ax.set_xlabel('Observed Wavelength [µm]', fontsize=15)
+    ax.set_ylabel('Flux [µJy]', fontsize=15)
     ax.set_xlim(0.4, 35)#200)    # Change x range    
     ax.set_xscale('log')
     ax.set_yscale('log')
     
     if gid in [7549, 7696, 8013, 9395, 10339, 10400, 11142, 11247, 11494, 12133, 12175, 12332, 21472, 21477]:
-        ax.legend(loc="lower right")
+        ax.legend(loc="lower right", fontsize=12)
+        ax.text(0.03, 0.95, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     else:
-        ax.legend(loc="upper left")
+        ax.legend(loc="upper left", fontsize=12)
+        ax.text(0.86, 0.09, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     #ax.set_title(f"Galaxy {objid} at z={np.round(zred,2)}", fontsize=14)
 
-    ax.tick_params(axis='both', which='major', labelsize=13)
+    ax.tick_params(axis='both', which='major', labelsize=15)
     
-    zred_rounded = np.round(zred,2)
-    #plt.title(f"Galaxy {objid} at z={zred_rounded}")
+    #zred_rounded = np.round(zred,2)
+    #plt.title(f"z = {zred_rounded}")
     plt.tight_layout()
     
     if plot_dir:
@@ -213,7 +225,7 @@ def plot_miri_fit(filename, plot_dir=None):
     except FileNotFoundError:
         print(f"⚠️ Attention: File {filename} not found. Skipping...")
         return 
-    
+
     gid = fit_data['id']
     zred = fit_data['zred']
     
@@ -257,8 +269,24 @@ def plot_miri_fit(filename, plot_dir=None):
     
     ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
     
-    #########    PLOT MODEL PHOTOMETRY     #########   
-    ax.plot(phot_wave_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
+    #########    PLOT MODEL PHOTOMETRY     #########
+    # Identify which filters have actual valid observations in obs
+    obs_maggies = np.array(obs['maggies'])
+    obs_unc = np.array(obs['maggies_unc'])
+    
+    # Valid observations must be finite numbers with positive uncertainty
+    valid_obs_mask = np.isfinite(obs_maggies) & np.isfinite(obs_unc) & (obs_unc > 0)
+    
+    # Plot model photometry ONLY where valid observations exist
+    ax.plot(
+        phot_wave_microns[valid_obs_mask], 
+        phot_scaled[valid_obs_mask], 
+        'd', 
+        markersize=6, 
+        color='black', 
+        zorder=5,
+        label='Model photometry'
+    )
     
     #########  PLOT MEASURED PHOTOMETRY    #########
 
@@ -272,6 +300,9 @@ def plot_miri_fit(filename, plot_dir=None):
     
     # Get current labels to prevent duplicates
     _, labels = ax.get_legend_handles_labels()
+    
+    
+    obs_phot = []
     
     for i, filt in enumerate(obs['filters']):
         
@@ -331,6 +362,8 @@ def plot_miri_fit(filename, plot_dir=None):
         # Update labels list to prevent duplicates in current loop
         if style['label'] not in labels:
             labels.append(style['label'])
+        
+        obs_phot.append(flux)
             
     
     # Compute bounds
@@ -342,7 +375,11 @@ def plot_miri_fit(filename, plot_dir=None):
 
     # Compute y-axis limits
     ymin = np.nanmin(spec_within)
-    ymax = np.nanmax(spec_within)
+    ymax_spec = np.nanmax(spec_within)
+    ymax_phot = np.nanmax(obs_phot)
+    
+    ymax = np.maximum(ymax_spec, ymax_phot)
+    
     
     # Add margin proportionally, protecting against log-scale issues
     ymin_plot = ymin * 0.2  # reduce, but stay > 0
