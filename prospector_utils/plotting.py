@@ -114,7 +114,7 @@ def plot_reconstructed_fit(filename, plot_dir=None):
     wave_spec = model['wave_spec']
     sample_specs = model['sample_specs']
     phot = model['phot']
-    phot_miri = model['phot_miri_med']
+    phot_miri = model['phot_miri_best']
     phot_miri_err = model['phot_miri_err']
     phot_wave = model['phot_wave']
     phot_wave_miri = model['phot_wave_miri']
@@ -284,7 +284,6 @@ def plot_miri_fit(filename, plot_dir=None):
         'd', 
         markersize=6, 
         color='black', 
-        zorder=5,
         label='Model photometry'
     )
     
@@ -398,6 +397,15 @@ def plot_miri_fit(filename, plot_dir=None):
     #ax.set_title(f"Galaxy {objid} at z={np.round(zred,2)}", fontsize=14)
 
     ax.tick_params(axis='both', which='major', labelsize=13)
+    
+    if gid in [7549, 7696, 8013, 9395, 10339, 10400, 11142, 11247, 11494, 12133, 12175, 12332, 21472, 21477]:
+        ax.legend(loc="lower right", fontsize=12)
+        ax.text(0.03, 0.95, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    else:
+        ax.legend(loc="upper left", fontsize=12)
+        ax.text(0.86, 0.09, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
     zred_rounded = np.round(zred,2)
     #plt.title(f"Galaxy {objid} at z={zred_rounded}")
