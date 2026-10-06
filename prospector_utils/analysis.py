@@ -627,13 +627,13 @@ def analyse_fits_with_miri(galaxy_ids, data_dir, plot_dir=None, stats_dir=None,
         phot_miri_samples = []
         lir_samples = []
         
-        # MIRI filter dict
+        # Keys must be the sedpy names printed by filt.name:
         filter_dict_miri = {
-                'F770W':  'jwst_f770w',
-                'F1000W': 'jwst_f1000w',
-                'F1800W': 'jwst_f1800w',
-                'F2100W': 'jwst_f2100w'
-            }
+            'jwst_f770w':  'F770W',
+            'jwst_f1000w': 'F1000W',
+            'jwst_f1800w': 'F1800W',
+            'jwst_f2100w': 'F2100W'
+        }
         
         # Initialise containers
         miri_filters    = []
@@ -650,6 +650,7 @@ def analyse_fits_with_miri(galaxy_ids, data_dir, plot_dir=None, stats_dir=None,
                 continue
             
             fname = filt.name.lower().strip()
+            
             if fname in filter_dict_miri:
                 f_val = obs['maggies'][i]
                 e_val = obs['maggies_unc'][i]
@@ -868,8 +869,8 @@ def analyse_fits_with_miri(galaxy_ids, data_dir, plot_dir=None, stats_dir=None,
         chi2_red_miri = np.nanmean(N_sigma**2) if np.any(np.isfinite(N_sigma)) else np.nan        
         fit_quality['chi2_red'] = chi2_red_miri
         
-        for i, band in enumerate(miri_band_names):
-                        
+        for i, band in enumerate(miri_band_names):         
+            
             f_o = miri_obs_flux[i]
             e_o = miri_obs_err[i]
             f_m = phot_miri_best[i] # Use best-fit model flux for comparison
