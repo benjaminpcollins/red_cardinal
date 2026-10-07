@@ -388,15 +388,15 @@ def plot_miri_fit(filename, plot_dir=None):
     ax.set_ylim(ymin_plot, ymax_plot)
 
     # Plot formatting
-    ax.set_xlabel('Observed Wavelength [µm]', fontsize=13)
-    ax.set_ylabel('Flux [µJy]', fontsize=13)
+    ax.set_xlabel('Observed Wavelength [µm]', fontsize=15)
+    ax.set_ylabel('Flux [µJy]', fontsize=15)
     ax.set_xlim(0.4, 35)#200)    # Change x range    
     ax.set_xscale('log')
     ax.set_yscale('log')
     ax.legend(loc="upper left")
     #ax.set_title(f"Galaxy {objid} at z={np.round(zred,2)}", fontsize=14)
 
-    ax.tick_params(axis='both', which='major', labelsize=13)
+    ax.tick_params(axis='both', which='major', labelsize=15)
     
     if gid in [7549, 7696, 8013, 9395, 10339, 10400, 11142, 11247, 11494, 12133, 12175, 12332, 21472, 21477]:
         ax.legend(loc="lower right", fontsize=12)

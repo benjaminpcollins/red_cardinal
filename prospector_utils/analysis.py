@@ -1011,3 +1011,51 @@ def summarise_chain(chain_array, map_value=np.nan):
         'err_low': float(p50 - p16),
         'err_high': float(p84 - p50)
     }
+    
+
+def extract_galaxy_data(objid, folder_path):
+    """
+    Reads galaxy results from either .pkl or .h5 files.
+    Returns: dict with log_L_ir_median, err_low_dex, err_high_dex, dust, logmass, sfr
+    """
+    # Pattern A: If saved as .pkl summary dictionaries
+    pkl_files = glob.glob(os.path.join(folder_path, f"*{objid}*.pkl"))
+    if len(pkl_files) > 0:
+        with open(pkl_files[0], 'rb') as f:
+            d = pkl.load(f)
+            
+        # Example structure: adapt keys if needed
+        lir_stats = d.get('derived_props', {}).get('log_L_ir', {})
+        lir_chain = d.get('chains', {}).get('log_L_ir', {})
+        dust_stats = d.get('derived_props', {}).get('A_V', d.get('fit_params', {}).get('dust2', {}))
+        mass_stats = d.get('fit_params', {}).get('logmass', {})
+        sfr_stats = d.get('derived_props', {}).get('log_sfr_100myr', {})
+        
+        return {
+            'lir_median': lir_stats.get('median', np.nan),
+            'lir_err_low': lir_stats.get('err_low', np.nan),
+            'lir_err_high': lir_stats.get('err_high', np.nan),
+            'dust_median': dust_stats.get('median', dust_stats.get('map', np.nan)),
+            'dust_err_low': dust_stats.get('err_low', np.nan),
+            'dust_err_high': dust_stats.get('err_high', np.nan),
+            'logmass': mass_stats.get('median', np.nan),
+            'log_sfr_100myr': sfr_stats.get('median', np.nan),
+            'lir_chain': lir_chain
+        }
+        
+
+
+
+def get_fit_params(objid, folder_path):
+    """
+    Reads galaxy results from either .pkl or .h5 files.
+    Returns: dict with log_L_ir_median, err_low_dex, err_high_dex, dust, logmass, sfr
+    """
+    # Pattern A: If saved as .pkl summary dictionaries
+    pkl_files = glob.glob(os.path.join(folder_path, f"*{objid}*.pkl"))
+    if len(pkl_files) > 0:
+        with open(pkl_files[0], 'rb') as f:
+            d = pkl.load(f)
+            
+        # Example structure: adapt keys if needed
+        fit_params = d.get('fit_params', {})

@@ -9,7 +9,7 @@ import prospect.io.read_results as reader
 from prospect.models import priors
 from prospect.models.templates import TemplateLibrary
 from prospect.models import transforms
-from astropy.cosmology import WMAP9 as cosmo
+from astropy.cosmology import Planck18 as cosmo
 from prospect.models.sedmodel import PolySpecModel, SpecModel
 from prospect.utils.obsutils import fix_obs
 
@@ -74,7 +74,7 @@ def update_obs_with_miri(objid, obs, phot_table_miri):
         flux = row[f"{code}_flux"]
         err  = row[f"{code}_flux_err"]
 
-        if np.isfinite(flux) and np.isfinite(err) and err > 0:
+        if np.isfinite(flux) and np.isfinite(err) and (err > 0):
             valid_fluxes.append(flux / 3631)      # Jy → maggies
             valid_errors.append(err / 3631)
             valid_filters.append(sedpy_name)
@@ -89,15 +89,18 @@ def update_obs_with_miri(objid, obs, phot_table_miri):
     # -------------------------------------------------
     obs_new = obs.copy()
 
-    # concatenate maggies
+    # Concatenate maggies
+    obs_new['maggies_miri'] = np.array(valid_fluxes)
+    obs_new['maggies_unc_miri'] = np.array(valid_errors)
     obs_new['maggies_all'] = np.concatenate([obs['maggies'], valid_fluxes])
     obs_new['maggies_unc_all'] = np.concatenate([obs['maggies_unc'], valid_errors])
 
-    # concatenate filters
+    # Concatenate filters
     miri_filters = load_filters(valid_filters)
 
     obs_new['filters_all'] = obs['filters'] + miri_filters
     obs_new['filters_miri'] = miri_filters
+    obs_new['filter_code_miri'] = valid_codes
     obs_new['filter_code_all'] = obs['filter_code'] + valid_codes
 
     # wavelengths
