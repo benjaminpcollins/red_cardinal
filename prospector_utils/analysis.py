@@ -1,399 +1,1061 @@
 import os
 import glob
 import numpy as np
-import matplotlib.pyplot as plt
 import pickle as pkl
-from datetime import datetime
 import pandas as pd
-import fsps
 import prospect.io.read_results as reader
-from .params import build_obs, build_model, get_MAP
-from .plotting import load_and_display
-from sedpy.observate import getSED
-from astropy import constants as const
+
 from astropy.io import fits
-import pyphot
-from astropy.cosmology import WMAP9 as cosmo
+#from astropy.cosmology import WMAP9 as cosmo
 from prospect.models.transforms import logsfr_ratios_to_sfrs
+from prospect.sources import FastStepBasis
+from prospect.utils.plotting import posterior_samples
+from astropy.cosmology import Planck18 as cosmo
+from prospect.models.sedmodel import PolySpecModel, SpecModel
 
 
-def predict_phot():
+from astropy import units as u
+from astropy import constants as const
+from scipy.integrate import trapezoid
 
-    lib = pyphot.get_library
-    print(lib)
-    
-def get_model_photometry(spec, wave_spec, filters, zred):
-    """
-    Generate a model photometry prediction on a prospector model spectrum using sedpy
+from .params import *
+from .plotting import *
+
+
+
+def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None, 
+                 add_duste=True, n_samples=100, run='standard', overwrite=False):
+    """Main function to reconstruct and plot PROSPECTOR results with MIRI data
     
     Parameters:
     -----------
-    spec : ndarray
-        The model spectrum in units of maggies (standard units for Prospector).
-    wave_spec : ndarray
-        The wavelength grid corresponding to the model spectrum in Angstroms.
-    filters : list of sedpy Filter objects
-        The list of filters for which to compute the photometry.
-    zred : float
-        The redshift of the object.
-    
-    Returns:
-    --------
-    phot_new : ndarray
-        The predicted photometry in the same units as the input spectrum.
-    """ 
-    
-    # 1) maggies -> f_nu [erg/s/cm^2/Hz]
-    fnu_cgs = spec * 3631e-23
-    
-    # 2) f_nu -> f_lambda_rest [erg/s/cm^2/Å]
-    wave_cm = wave_spec * 1e-8  # Convert Å to cm
-    flam_cgs = fnu_cgs * const.c.cgs.value / wave_cm**2 / 1e8  # /1e8 converts cm⁻¹ to Å⁻¹
-    
-    # 3) Move to observer frame
-    lam_obs_A = wave_spec * (1.0 + zred)  # in AA
-    flam_obs  = flam_cgs / (1.0 + zred)  # critical!
-    
-    # 4) Recreate photometry
-    phot_new = getSED(lam_obs_A, flam_obs, filterlist=filters, linear_flux=True)   
-    
-    return phot_new
-
-def compute_residuals(objid, show_plot=True):
-    """Calculate the residuals between the Prospector model photometry and the observed photometry for a given object ID.
-
-    Args:
-        objid (int): The galaxy ID for which to compute the residuals.
-        show_plot (bool): Whether to display the plot of the model and observed photometry. Defaults to True.
-
-    Returns:
-        rows (dict): Dictionary containing the computed residuals and other relevant data.
+    galaxy_ids : list
+        List of galaxy IDs to analyse
+    phot_table : str
+        Path to the MIRI photometry table
+    data_dir : str
+        Directory storing the PROSPECTOR h5 output files
+    plot_dir : str, optional
+        Directory to store the plots in
+    stats_dir : str, optional
+        Directory to write the fit statistics to
+    add_duste : bool, optional
+        Add dust emission to the fits
+    n_samples : int, optional
+        Number of posterior samples to draw for uncertainty estimation
+    run : str, optional
+        Accepted run arguments are 'standard' or 'nirspec'
+    overwrite : bool, optional
+        Whether to overwrite existing pickle files in stats_dir
     """
+
+    print(f"Analysing fits of {len(galaxy_ids)} galaxies...\n")
     
-    try:
-        pkl_file = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_files/{objid}.pkl'
+    os.makedirs(stats_dir, exist_ok=True)
+    
+    for objid in galaxy_ids:
         
-        with open(pkl_file, 'rb') as f:
-            fit_data = pkl.load(f)
+        objid = int(objid)
+        
+        filename = os.path.join(stats_dir, f"{objid}.pkl")
+        
+        if os.path.exists(filename) and not overwrite:
+            print(f"Skipping galaxy {objid} - output file already exists!")
+            if plot_dir:
+                        plot_reconstructed_fit(filename, plot_dir)
+            continue
+        
+        elif os.path.exists(filename) and overwrite:
+            print(f"Overwriting existing output for galaxy {objid}...")
+        
+        print(f"============ Processing galaxy {objid} ================")
+        
+        # ------------------------------------------------------------------
+        # Section 1: Getting the best-fit model
+        # ------------------------------------------------------------------
+        
+        # Load the h5 file for the given objid
+        h5_file = glob.glob(os.path.join(data_dir, f"output_{objid}*.h5"))
+        
+        try:
+            h5_file = h5_file[0]
+        except IndexError:
+            print(f"No PROSPECTOR results found for objid {objid}.")
+            continue
+
+        # Load PROSPECTOR results
+        full_path = os.path.join(data_dir, h5_file)
+        results, obs, model = reader.results_from(full_path)
+        
+        # Now we have to exclude the last 3 parameters from the fit
+        map_parameters = get_MAP(results)
+        
+        # Build the MAP dictionary
+        MAP = {}
+        for a,b in zip(results['theta_labels'], map_parameters):
+            MAP[a] = b
+
+        zred = MAP['zred']
+        logmass = MAP['logmass']
+        dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
+        
+        ##########################################
+        #
+        # Section 1: Rebuilding the PROSPECTOR fit
+        #
+        ##########################################
+        
+        # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
+        sps = FastStepBasis(zcontinuous=1)
+        
+        if run == 'nirspec':
+            model = rebuild_model(zred, add_neb=True)
             
-    except FileNotFoundError:
-        print(f"File {pkl_file} not found. Please check the object ID or file path.")
-        return None
-
-    print('======================================')
-    print(f"Analysing fit data for galaxy {objid}...")
-
-    obs = fit_data['obs']
-    
-    filters = obs['filters']
-    filters_all = obs['filters_all']
-    
-    if len(filters) == len(filters_all):
-        print("⚠️It seems like there are no MIRI data available...Skipping")
-        return None  # No MIRI bands, nothing to do
-    
-    wave_phot_all = obs['phot_wave_all']
-    maggies_all = obs['maggies_all']
-    model = fit_data['model']
-    
-    wave_spec = model['wave_spec']
-    spec = model['spec_bestfit']
-    spec_16th = model['spec_16th']
-    spec_84th = model['spec_84th']
-    
-    phot = model['phot']
-    wave_phot = model['wave_phot']
-    
-    zred = fit_data['redshift']
-    
-    # Compare to stored obs
-    obs_flux = obs['maggies']
-    obs_err  = obs['maggies_unc']
-    
-    # Use sedpy to compute the model photometry in the MIRI bands
-    phot_new = get_model_photometry(spec, wave_spec, filters, zred)
-    phot_new_all = get_model_photometry(spec, wave_spec, filters_all, zred)
-
-    phot_16th = get_model_photometry(spec_16th, wave_spec, filters_all, zred)
-    phot_84th = get_model_photometry(spec_84th, wave_spec, filters_all, zred)
-    
-    # Calculate the ratio between my model photometry and the Prospector model photometry
-    ratio = phot_new / phot
-    
-    phot_new_all /= ratio.mean()  # normalise to match
-    phot_84th /= ratio.mean()
-    phot_16th /= ratio.mean()
-    
-    # Extract model predictions at MIRI bands
-    miri_mask = (wave_phot_all > 75000) & (wave_phot_all < 300000)  # AA
-    model_flux = phot_new_all[miri_mask]
-    model_err  = 0.5 * (phot_84th[miri_mask] - phot_16th[miri_mask]) # approximate error for the prospector fit
-    
-    # Extract obs at MIRI bands
-    obs_wave = obs['phot_wave_all']
-    obs_flux = obs['maggies_all']
-    obs_err  = obs['maggies_unc_all']
-    
-    obs_wave = obs_wave[miri_mask]
-    obs_flux = obs_flux[miri_mask]
-    obs_err  = obs_err[miri_mask]
-
-    if show_plot: load_and_display(objid, mod=model_flux, mod_err=model_err, outfile=f"/Users/benjamincollins/University/Master/Red_Cardinal/prospector/fits_v3/{objid}.png")
-
-    # Compute N_sigma
-    delta = obs_flux - model_flux
-    
-    # Compute it also in percentage of observed MIRI flux
-    perc = delta / obs_flux
-    
-    tot_err = np.sqrt(model_err**2 + obs_err**2)
-    N_sigma = delta / tot_err
-    
-    # Filters for MIRI bands
-    miri_bands = [f for f, keep in zip(filters_all, miri_mask) if keep]    
-    
-    rows = []
-    for f, lam, nsig, obs, obs_err, mod, mod_err, p in zip(
-        miri_bands, obs_wave, N_sigma, obs_flux, obs_err, model_flux, model_err, perc
-    ):   
-    
-        rows.append({
-            "galaxy_id": objid,
-            "zred": zred,
-            "filter_name": f.name,
-            "obs_wave": lam,
-            "obs_flux": obs,
-            "obs_err": obs_err,
-            "model_flux": mod,
-            "model_err": mod_err,
-            "N_sigma": nsig,
-            "perc_diff": p,
-            "mean_ratio": ratio.mean(),
-            "std_ratio": ratio.std()
-        })
-    
-    print("Sigmas: ", N_sigma)
-    print("Percentage difference:", perc)
-    
-    if objid == '8465': 
-        print("⚠️ Found galaxy with ID 8465, printing stats")
-    
-    return rows
-
-def get_galaxy_properties(gid, phot_miri, non_detections=None):
-    """Obtain the star formation rates (SFRs) from the Prospector fit for a given galaxy ID.
-
-    Args:
-        gid (int): The galaxy ID for which to obtain the SFRs.
-    
-    Returns:
-        sfrs (ndarray): Array of star formation rates in solar masses per year.
-    """
-    
-    # ============================
-    # Part related to PROSPECTOR
-    # ============================
-    prospect_dir = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
-    
-    # Load the h5 file for the given objid
-    h5_path = os.path.join(prospect_dir, f"output_{gid}*.h5")
-    h5_file = glob.glob(h5_path)
-    
-    try:
-        h5_file = h5_file[0]
-        print(f"Found PROSPECTOR results for objid {gid}: {h5_file}")
-    except IndexError:
-        print(f"No PROSPECTOR results found for objid {gid}.")
-        return None
-    
-    # Load PROSPECTOR results
-    full_path = os.path.join(prospect_dir, h5_file)
-    results, _, _ = reader.results_from(full_path)
-    
-    # Get the MAP parameters
-    map_parameters = get_MAP(results)
-    map_parameters = map_parameters[:-3]
-    
-    # Build the MAP dictionary
-    MAP = {}
-    for a,b in zip(results['theta_labels'], map_parameters):
-        MAP[a] = b
-
-    zred = MAP['zred']
-    logmass = MAP['logmass']
-    dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
-    
-    """
-    dust_tesc – (default: 7.0) 
-        Stars younger than dust_tesc are attenuated by both dust1 and dust2, 
-            while stars older are attenuated by dust2 only. Units are log(yrs).
-    dust1 – (default: 0.0) 
-        Dust parameter describing the attenuation of young stellar light, 
-            i.e. where t <= dust_tesc (for details, see Conroy et al. 2009a).
-    dust2 – (default: 0.0) 
-        Dust parameter describing the attenuation of old stellar light, 
-        i.e. where t > dust_tesc (for details, see Conroy et al. 2009a).
-
-    Summary taken from https://dfm.io/python-fsps/current/stellarpop_api/#fsps.StellarPopulation.dust_mass
-    """ 
-
-    # Reconstruct agebins used in the fits
-    tuniv = cosmo.age(zred).value
-    agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
-    agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
-    agebins = np.array([agelims[:-1], agelims[1:]]).T
-    nbins = len(agelims) - 1
-    
-    # Collect logsfr_ratios
-    logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
-    
-    # Convert to SFRs
-    sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
-    
-    # Convert log age bins to linear time (yr)
-    bin_edges = 10**agebins  # shape (nbins, 2)
-    
-    # Select bins younger than 100 Myr
-    timescale = 1e8  # 100 Myr in years
-    tcut = timescale
-    
-    # Compute overlap of each bin with interval [0, tcut]
-    overlap = np.maximum(0.0, np.minimum(bin_edges[:,1], tcut) - np.minimum(bin_edges[:,0], tcut))
-    
-    # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
-    mass_in_window = np.sum(sfrs * overlap)
-    sfr_last100 = mass_in_window / timescale
-    
-    # ============================
-    # Part related to the photometry
-    # ============================
-    
-    # List of all MIRI bands
-    all_bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
-
-    ph_miri = phot_miri[phot_miri['ID'] == gid]
-
-    if len(ph_miri) == 0:
-        print(f"No MIRI entry for galaxy {gid}")
-        return None
-
-    # Filters actually observed for this galaxy
-    filters_available = ph_miri['Filters'][0].split(',')  # e.g., ['F770W', 'F1800W']
-    flux_array = np.ma.filled(ph_miri['Flux'][0], fill_value=np.nan)
-    err_array  = np.ma.filled(ph_miri['Flux_Err'][0], fill_value=np.nan)
-
-    print(f"Flux array: {flux_array}")
-
-    # Initialize dictionaries
-    flux = {}       # Only contains valid fluxes
-    err  = {}
-    detections = {band: False for band in all_bands}  # Default False
-
-    # Fill in values
-    for band, fval, ferr in zip(all_bands, flux_array, err_array):
-        # Check for non-detections
-        is_detected = True
-        if non_detections is not None and gid in non_detections.get(band, []):
-            is_detected = False
-        elif np.isnan(fval) or fval < 0:
-            is_detected = False
-
-        detections[band] = is_detected
-
-        if is_detected:
-            flux[band] = fval
-            err[band]  = ferr
-
-    # Example output
-    print(f"Galaxy {gid} fluxes (valid only): {flux}")
-    print(f"Galaxy {gid} detections (all bands): {detections}")
-
-
-    filters = ph_miri['Filters'][0].split(',') # e.g. ['F770W', 'F1800W']
-    
-    print(filters)
-    
-    # Dictionary to track which bands are valid 
-    detected = {band: True for band in filters} 
-    
-    for band in filters: 
-        # If this galaxy is marked as a non-detection in that band 
-        if non_detections is not None and gid in non_detections.get(band, []): 
-            detected[band] = False
+            # Add model to the results variable
+            results['model'] = model
             
-    # ============================
-    # Part related to the fit quality
-    # ============================
-    
-    csv_path = '/Users/benjamincollins/University/Master/Red_Cardinal/prospector/analysis/residuals_abs.csv'
-    df = pd.read_csv(csv_path)
-    subset = df[df['galaxy_id'] == gid]
-    nsig = subset['N_sigma']
-    
-    # Compute reduced chi^2 per galaxy
-    n_filters = len(subset)
-    
-    # for undetected galaxies there are 0 valid MIRI bands
-    if n_filters == 0:
-        chi2_red = np.nan
-    else:
-        chi2_red = np.sum(nsig**2) / n_filters           
+            # Keys that relate to the 1D spectrum
+            spec_keys = ['wavelength', 'spectrum', 'unc', 'mask', 'sigma_v']
 
-    perc_diff = subset['perc_diff']
+            for key in spec_keys:
+                if key in obs:
+                    obs[key] = None
+
+            # Optional: ensure logify_spectrum is False if you aren't using a spectrum
+            obs['logify_spectrum'] = False
+
+        elif model == None:
+            print("⚠️ Warning: No model found in the results. Rebuilding the model from parameters...")
+            model = dict(results['model_params'][0])
+            model = PolySpecModel(model)  
+            
+        # Decide on whether to include dust emission or not
+        if add_duste:
+            # Obtain best fit model spectrum and model photometry    
+            spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
+        else:
+            print("⚠️ Dust emission is turned off.")
+        
+            # 1. Create a copy of your MAP parameters
+            no_dust_params = map_parameters.copy()
+
+            # 2. Toggle the model setting to False
+            # This prevents the code from adding the IR 'glow'
+            model.params['add_dust_emission'] = np.array([False])
+
+            # 3. Predict the spectrum
+            # The resulting spec/phot will show the attenuated UV but NO IR emission
+            spec, phot, _ = model.predict(no_dust_params, obs=obs, sps=sps)    
+        
+        # Convert maggies to µJy
+        maggies_to_muJy = 3631e6
+        
+        # Wavelengths of the model spectrum
+        wave_spec = sps.wavelengths
+        
+        # Convert to arrays
+        phot = np.array(phot)
+        
+        # Make sure everything is scaled properly for NIRSpec if needed
+        if run == 'nirspec':
+            # Make sure to scale the spectra and photometry accordingly
+            cat_path = '/Users/benjamincollins/Data/Bluejay/combined_catalog_v2.0.4.fits'
+            cat_table = Table.read(cat_path)
     
+            mask = cat_table['ID'] == objid
+            result = cat_table['slit_flux_fraction_F444W'][mask]
+            slit_flux_fraction = result.value[0]
+        
+            # Scale photometry
+            phot /= slit_flux_fraction
+            obs['maggies'] /= slit_flux_fraction
+            obs['maggies_unc'] /= slit_flux_fraction
+            
+            # Scale spectroscopy
+            spec /= slit_flux_fraction
+        
+        # Compute best-fit IR luminosity (scaled if NIRSpec)
+        lir_best = _integrate_ir_lum(spec, wave_spec, zred)
+        log_lir_best = np.log10(lir_best) if lir_best > 0 else np.nan
+                
+        sample_specs = []
+        phot_miri_samples = []
+        lir_samples = []
+        
+        # Extend the obs dictionary with MIRI photometry for plotting
+        obs_miri = update_obs_with_miri(objid, obs, phot_table)
+        filters = obs['filters']
+        miri_filters = obs_miri['filters_miri']
+        miri_band_names = obs_miri['filter_code_miri']
+        
+        # Draw weighted posterior samples
+        samples = posterior_samples(results, n_samples)
+        theta_names = list(results['theta_labels'])
+        
+        for params_i in samples:
+            spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
+            if run == 'nirspec':
+                spec_i /= slit_flux_fraction
+            sample_specs.append(spec_i)
+            
+            # Integrate L_IR for each individual sample spectra
+            lir_i = _integrate_ir_lum(spec_i, wave_spec, zred)
+            lir_samples.append(lir_i)
+            
+            # Compute predicted photometry for MIRI bands for each sample
+            phot_i = get_model_photometry(spec_i, wave_spec, miri_filters, zred)
+            phot_miri_samples.append(phot_i)
+        
+        sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
+        lir_samples = np.array(lir_samples)  # shape: (nsample,)
+                
+        # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
+        lower = np.percentile(sample_specs, 16, axis=0)
+        median = np.percentile(sample_specs, 50, axis=0)
+        upper = np.percentile(sample_specs, 84, axis=0)    
+        
+        # Identify valid MIRI bands from the attached table
+        miri_obs_flux = []
+        miri_obs_err  = []
+        
+        miri_flux_all = obs_miri['maggies_miri'] 
+        miri_err_all  = obs_miri['maggies_unc_miri']
+        
+        for f_o, e_o in zip(miri_flux_all, miri_err_all):
+            miri_obs_flux.append(f_o)
+            miri_obs_err.append(e_o)
+        
+        miri_obs_flux = np.array(miri_obs_flux)
+        miri_obs_err  = np.array(miri_obs_err)
+        
+        # Compute filter wavelength in microns
+        phot_wave      = np.array([filt.wave_effective for filt in filters])  # in Angstroms
+        phot_wave_miri = np.array([filt.wave_effective for filt in miri_filters])  # in Angstroms            
+        
+        # ------------------------------------------------------------------
+        # Section 2: Pulling weighted samples and storing the parameters
+        # ------------------------------------------------------------------
+        
+        # Compute log10(L_IR) for valid samples (L_IR > 0)
+        valid_lir = lir_samples > 0
+        log_lir_samples = np.full(n_samples, np.nan)
+        log_lir_samples[valid_lir] = np.log10(lir_samples[valid_lir])
+        
+        # Get predicted photometry for MIRI bands + errors from the posterior samples
+        phot_miri_best   = get_model_photometry(spec, wave_spec, miri_filters, zred)
+        phot_miri_med = np.nanpercentile(phot_miri_samples, 50, axis=0)
+        phot_miri_16 = np.nanpercentile(phot_miri_samples, 16, axis=0)
+        phot_miri_84 = np.nanpercentile(phot_miri_samples, 84, axis=0)
+        phot_miri_err   = 0.5*(phot_miri_84 - phot_miri_16)          
+                    
+        print("Successfully reconstructed fit...")
+        
+        # ------------------------------------------------------------------
+        # Section 3: Reconstruct SFH
+        # ------------------------------------------------------------------
+        
+        # Reconstruct agebins used in the fits
+        tuniv = cosmo.age(zred).value
+        agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
+        agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
+        agebins = np.array([agelims[:-1], agelims[1:]]).T
+        nbins = len(agelims) - 1
+        
+        # Collect logsfr_ratios
+        logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
+        
+        # Convert to SFRs
+        sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
+        
+        # Convert log age bins to linear time (yr)
+        bin_edges = 10**agebins  # shape (nbins, 2)
+        
+        # Select bins younger than a certain timescale
+        t100 = 1e8  # 100 Myr in years
+        t30 = 3e7   #  30 Myr in years
+        
+        # Compute overlap of each bin with interval [0, tcut]
+        overlap100 = np.maximum(0.0, np.minimum(bin_edges[:,1], t100) - np.minimum(bin_edges[:,0], t100))
+        overlap30 = np.maximum(0.0, np.minimum(bin_edges[:,1], t30) - np.minimum(bin_edges[:,0], t30))
+        
+        # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
+        sfr_100_best = np.sum(sfrs * overlap100) / t100
+        sfr_30_best = np.sum(sfrs * overlap30) / t30
+        
+        # Convert to log10(SFR)
+        log_sfr_100_best = np.log10(sfr_100_best) if sfr_100_best > 0 else np.nan
+        log_sfr_30_best  = np.log10(sfr_30_best)  if sfr_30_best  > 0 else np.nan
+
+        log_ssfr_100_best = log_sfr_100_best - logmass if np.isfinite(log_sfr_100_best) else np.nan
+        log_ssfr_30_best  = log_sfr_30_best  - logmass if np.isfinite(log_sfr_30_best)  else np.nan
+        
+        # ----------------------------------------------------------------------
+        # Compute SFR distribution across posterior samples
+        # ----------------------------------------------------------------------
+        
+        # Map theta indices for fast lookup
+        theta_names = results['theta_labels']
+        fit_params_stats = {}
+        param_chains = {}
+        
+        for idx, param_name in enumerate(theta_names):
+            # Exclude SFR ratio parameters
+            if param_name.startswith('logsfr_ratios'):
+                continue
+            
+            chain = samples[:, idx]
+            map_val = MAP.get(param_name, np.nan)
+            
+            if np.isnan(map_val):
+                print(f"⚠️ Warning: MAP value for parameter '{param_name}' is NaN. Check the results.")
+            
+            # Save the 1D sample vector (shape: n_samples,)
+            param_chains[param_name] = chain
+            
+            # Save quantiles, uncertainties, and MAP estimate
+            fit_params_stats[param_name] = summarise_chain(chain, map_value=map_val)
+        
+        logmass_idx = theta_names.index('logmass')
+        dust2_idx = theta_names.index('dust2')
+        ratio_indices = [
+            i for i, name in enumerate(theta_names) 
+            if name.startswith('logsfr_ratios_')
+        ]
+
+        log_sfr_100_samples = []
+        log_sfr_30_samples = []
+        
+        log_ssfr_100_samples = []
+        log_ssfr_30_samples = []
+        
+        dust2_samples = []
+
+        for s_params in samples:
+            s_logm = s_params[logmass_idx]
+            s_r = s_params[ratio_indices]
+                        
+            # Get SFRs for each sample using the same age bins
+            s_bins = logsfr_ratios_to_sfrs(s_logm, s_r, agebins)
+            s_sfr_100 = np.sum(s_bins * overlap100) / t100
+            s_sfr_30  = np.sum(s_bins * overlap30) / t30
+            
+            s_log_sfr_100 = np.log10(s_sfr_100) if s_sfr_100 > 0 else np.nan
+            s_log_sfr_30  = np.log10(s_sfr_30)  if s_sfr_30  > 0 else np.nan
+            
+            log_sfr_100_samples.append(s_log_sfr_100)
+            log_sfr_30_samples.append(s_log_sfr_30)
+
+            # Specific starformation rate (sSFR) = SFR / stellar mass
+            s_log_ssfr_100 = s_log_sfr_100 - s_logm if np.isfinite(s_log_sfr_100) else np.nan
+            s_log_ssfr_30 = s_log_sfr_30 - s_logm if np.isfinite(s_log_sfr_30) else np.nan
+            
+            log_ssfr_100_samples.append(s_log_ssfr_100)
+            log_ssfr_30_samples.append(s_log_ssfr_30)
+            
+        log_sfr_100_samples = np.array(log_sfr_100_samples)
+        log_sfr_30_samples = np.array(log_sfr_30_samples)
+        
+        log_ssfr_100_samples = np.array(log_ssfr_100_samples)
+        log_ssfr_30_samples = np.array(log_ssfr_30_samples)
+        
+        # Convert dust2 to A_V
+        dust2_samples = 1.086 * samples[:, dust2_idx]
+
+        # Add derived chains
+        derived_chains = {
+            'log_sfr_100myr':  log_sfr_100_samples,
+            'log_sfr_30myr':   log_sfr_30_samples,
+            'log_ssfr_100myr': log_ssfr_100_samples,
+            'log_ssfr_30myr':  log_ssfr_30_samples,
+            'A_V':             dust2_samples,
+            'log_L_ir':        log_lir_samples  # From the sample-by-sample integration loop
+        }
+        
+        # Add derived stats including percentiles
+        derived_stats = {
+            'log_sfr_100myr':  summarise_chain(log_sfr_100_samples, map_value=log_sfr_100_best),
+            'log_sfr_30myr':   summarise_chain(log_sfr_30_samples, map_value=log_sfr_30_best),
+            'log_ssfr_100myr': summarise_chain(log_ssfr_100_samples, map_value=log_ssfr_100_best),
+            'log_ssfr_30myr':  summarise_chain(log_ssfr_30_samples, map_value=log_ssfr_30_best),
+            'A_V':             summarise_chain(dust2_samples, map_value=1.086 * dust2),
+            'log_L_ir':        summarise_chain(log_lir_samples, map_value=log_lir_best)
+        }
     
-    galaxy_data = {
-        "gid": gid,
-        "zred": zred,
-        "logmass": logmass,
-        "sfrs": sfrs,                     # SFR in each bin
-        "dust": dust2,
-        "sfr_last100": sfr_last100,       # averaged over last 100 Myr
-        "fluxes": flux,
-        "errors": err,
-        "detections": detected,
-        "nsig": dict(zip(filters, nsig)),
-        "chi2_red": chi2_red,
-        "frac_diff": dict(zip(filters, perc_diff))
+        print("Extracted galaxy properties...")
+        
+        # ------------------------------------------------------------------
+        # Section 4: Get fit quality statistics for each band
+        # ------------------------------------------------------------------
+        fit_quality = {}
+        
+        # Compute N_sigma
+        delta = phot_miri_med - miri_obs_flux # change sign here
+        tot_err = np.sqrt(phot_miri_err**2 + miri_obs_err**2)
+        
+        # Compute N_sigma only for valid errors to avoid division by zero
+        valid_err = tot_err > 0
+        N_sigma = np.full_like(delta, np.nan)
+        N_sigma[valid_err] = delta[valid_err] / tot_err[valid_err]
+        
+        # Compute reduced chi-squared for MIRI bands
+        chi2_red_miri = np.nanmean(N_sigma**2) if np.any(np.isfinite(N_sigma)) else np.nan        
+        fit_quality['chi2_red'] = chi2_red_miri
+        
+        for i, band in enumerate(miri_band_names):
+                        
+            f_o = miri_obs_flux[i]
+            e_o = miri_obs_err[i]
+            f_m = phot_miri_best[i] # Use best-fit model flux for comparison
+            f_n = phot_miri_med[i]
+            e_m = phot_miri_err[i]
+            
+            snr = (f_o / e_o) if e_o > 0 else 0
+            
+            # Factional variance
+            frac_var = (e_m / f_m)**2 + (e_o / f_o)**2
+            rel_err = np.sqrt(frac_var)
+            
+            # Linear flux ratio + error
+            ratio = f_m / f_o
+            ratio_err = ratio * rel_err
+            
+            # Logarithmic flux ratio + error
+            log_ratio = np.log10(f_m / f_o)    
+            log_ratio_err = (1.0 / np.log(10)) * np.sqrt(frac_var)
+        
+            
+            fit_quality[band] = {
+                'galaxy_id': objid,
+                'zred': zred,
+                'obs_flux': f_o * maggies_to_muJy,
+                'obs_err': e_o * maggies_to_muJy,
+                'mod_flux_best': f_m * maggies_to_muJy,
+                'mod_flux_med': f_n * maggies_to_muJy,
+                'mod_err': e_m * maggies_to_muJy,
+                'n_sigma': N_sigma[i],
+                'ratio': ratio,
+                'ratio_err': ratio_err,
+                'log_ratio': log_ratio,
+                'log_ratio_err': log_ratio_err,
+                'snr': snr
+            }            
+        
+        print("Computed fit quality statistics")
+        
+        data = {
+            # Important metadata
+            'id': objid,
+            'zred': zred,
+            'maggies_to_muJy': maggies_to_muJy,
+            
+            'model': {
+                'spec_best': spec,
+                'spec_16th': lower,
+                'spec_median': median,
+                'spec_84th': upper,
+                'wave_spec': wave_spec,
+                'sample_specs': sample_specs[:10],
+                'phot': phot,
+                'phot_wave': phot_wave,
+                'phot_miri_best': phot_miri_best,
+                'phot_miri_med': phot_miri_med,
+                'phot_miri_16': phot_miri_16,
+                'phot_miri_84': phot_miri_84,
+                'phot_miri_err': phot_miri_err,
+                'phot_wave_miri': phot_wave_miri
+            },
+            
+            # One entry for the observation dictionary
+            'obs': obs_miri,
+            
+            # Fit quality statistics for each MIRI band
+            'fit_quality': fit_quality,
+            
+            # Every fitted parameter from theta_labels (dust1_fraction, duste_gamma, etc.)
+            'fit_params': fit_params_stats,
+
+            # Derived integrated physical properties
+            'derived_props': derived_stats,
+
+            # 1D posterior chains for all parameters & derived quantities
+            # ** operator makes sure that all entries are stored at the same level
+            'chains': {
+                **param_chains,
+                **derived_chains
+            },
+            
+            # Moved it outside so it's easier accessible
+            'map_theta': MAP, # Keep the full raw dictionary just in case    
+            
+            # Age bins for SFH
+            'agebins': agebins
+        }
+        
+        # Write output to a pickle file
+        with open(filename, 'wb') as f:
+            pkl.dump(data, f)
+        print(f"💾 Saved data to {filename}")
+            
+        if plot_dir:
+            plot_reconstructed_fit(filename, plot_dir)
+    
+    return 
+
+
+
+
+
+
+def analyse_fits_with_miri(galaxy_ids, data_dir, plot_dir=None, stats_dir=None, 
+                 add_duste=True, n_samples=100, overwrite=False):
+    """Main function to reconstruct and plot PROSPECTOR results with MIRI data
+    
+    Parameters:
+    -----------
+    galaxy_ids : list
+        List of galaxy IDs to analyse
+    data_dir : str
+        Directory storing the PROSPECTOR h5 output files
+    plot_dir : str, optional
+        Directory to store the plots in
+    stats_dir : str, optional
+        Directory to write the fit statistics to
+    add_duste : bool, optional
+        Add dust emission to the fits
+    n_samples : int, optional
+        Number of posterior samples to draw for uncertainty estimation
+    overwrite : bool, optional
+        Whether to overwrite existing pickle files in stats_dir
+    """
+
+    print(f"Analysing fits of {len(galaxy_ids)} galaxies...\n")
+    
+    os.makedirs(stats_dir, exist_ok=True)
+    
+    for objid in galaxy_ids:
+        
+        objid = int(objid)
+        
+        filename = os.path.join(stats_dir, f"{objid}.pkl")
+        
+        if os.path.exists(filename) and not overwrite:
+            print(f"Skipping galaxy {objid} - output file already exists!")
+            if plot_dir:
+                plot_miri_fit(filename, plot_dir)
+            continue
+        
+        elif os.path.exists(filename) and overwrite:
+            print(f"Overwriting existing output for galaxy {objid}...")
+        
+        print(f"============ Processing galaxy {objid} ================")
+        
+        # ------------------------------------------------------------------
+        # Section 1: Getting the best-fit model
+        # ------------------------------------------------------------------
+        
+        # Load the h5 file for the given objid
+        h5_file = glob.glob(os.path.join(data_dir, f"output_{objid}*.h5"))
+        
+        try:
+            h5_file = h5_file[0]
+        except IndexError:
+            print(f"No PROSPECTOR results found for objid {objid}.")
+            continue
+
+        # Load PROSPECTOR results
+        full_path = os.path.join(data_dir, h5_file)
+        results, obs, model = reader.results_from(full_path)
+        
+        # Now we have to exclude the last 3 parameters from the fit
+        map_parameters = get_MAP(results)
+        
+        # Build the MAP dictionary
+        MAP = {}
+        for a,b in zip(results['theta_labels'], map_parameters):
+            MAP[a] = b
+
+        zred = MAP['zred']
+        logmass = MAP['logmass']
+        dust2 = MAP['dust2']    # extract the diffuse dust V-band optical depth
+        
+        ##########################################
+        #
+        # Section 1: Rebuilding the PROSPECTOR fit
+        #
+        ##########################################
+        
+        # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
+        sps = FastStepBasis(zcontinuous=1)
+
+        if model == None:
+            print("⚠️ Warning: No model found in the results. Rebuilding the model from parameters...")
+            model = dict(results['model_params'][0])
+            model = PolySpecModel(model)  
+            
+        # Decide on whether to include dust emission or not
+        if add_duste:
+            # Obtain best fit model spectrum and model photometry    
+            spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
+        else:
+            print("⚠️ Dust emission is turned off.")
+        
+            # 1. Create a copy of your MAP parameters
+            no_dust_params = map_parameters.copy()
+
+            # 2. Toggle the model setting to False
+            # This prevents the code from adding the IR 'glow'
+            model.params['add_dust_emission'] = np.array([False])
+
+            # 3. Predict the spectrum
+            # The resulting spec/phot will show the attenuated UV but NO IR emission
+            spec, phot, _ = model.predict(no_dust_params, obs=obs, sps=sps)    
+        
+        # Convert maggies to µJy
+        maggies_to_muJy = 3631e6
+        
+        # Wavelengths of the model spectrum
+        wave_spec = sps.wavelengths
+        
+        # Convert to arrays
+        phot = np.array(phot)
+        
+        # Compute best-fit IR luminosity (scaled if NIRSpec)
+        lir_best = _integrate_ir_lum(spec, wave_spec, zred)
+        log_lir_best = np.log10(lir_best) if lir_best > 0 else np.nan
+                
+        sample_specs = []
+        phot_miri_samples = []
+        lir_samples = []
+        
+        # Keys must be the sedpy names printed by filt.name:
+        filter_dict_miri = {
+            'jwst_f770w':  'F770W',
+            'jwst_f1000w': 'F1000W',
+            'jwst_f1800w': 'F1800W',
+            'jwst_f2100w': 'F2100W'
+        }
+        
+        # Initialise containers
+        miri_filters    = []
+        miri_band_names = []
+        miri_obs_flux   = []
+        miri_obs_err    = []
+        phot_miri       = []
+        phot_wave_miri  = []
+
+        # 2. Iterate and Filter
+        for i, filt in enumerate(obs['filters']):
+            # Check for NaN first to clean the entire analysis
+            if np.isnan(obs['maggies'][i]):
+                continue
+            
+            fname = filt.name.lower().strip()
+            
+            if fname in filter_dict_miri:
+                f_val = obs['maggies'][i]
+                e_val = obs['maggies_unc'][i]
+                
+                # Strictly require valid, positive detections
+                if np.isfinite(f_val) and np.isfinite(e_val) and (e_val > 0):
+                    miri_filters.append(filt)
+                    miri_band_names.append(filter_dict_miri[fname])
+                    miri_obs_flux.append(f_val)
+                    miri_obs_err.append(e_val)
+                    
+                    # Extract the exact corresponding predicted model flux from MAP predict
+                    phot_miri.append(phot[i])
+                    phot_wave_miri.append(filt.wave_effective)
+                
+        miri_obs_flux  = np.array(miri_obs_flux)
+        miri_obs_err   = np.array(miri_obs_err)
+        phot_miri      = np.array(phot_miri)
+        phot_wave_miri = np.array(phot_wave_miri)
+                
+        # Compute filter wavelength in microns
+        phot_wave = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms 
+        
+        # Draw weighted posterior samples
+        samples = posterior_samples(results, n_samples)
+        theta_names = list(results['theta_labels'])
+        
+        for params_i in samples:
+            spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
+            sample_specs.append(spec_i)
+            
+            # Integrate L_IR for each individual sample spectra
+            lir_i = _integrate_ir_lum(spec_i, wave_spec, zred)
+            lir_samples.append(lir_i)
+            
+            # Compute predicted photometry for MIRI bands for each sample
+            phot_i = get_model_photometry(spec_i, wave_spec, miri_filters, zred)
+            phot_miri_samples.append(phot_i)
+        
+        sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
+        lir_samples = np.array(lir_samples)  # shape: (nsample,)
+                
+        # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
+        lower = np.percentile(sample_specs, 16, axis=0)
+        median = np.percentile(sample_specs, 50, axis=0)
+        upper = np.percentile(sample_specs, 84, axis=0)    
+        
+        
+        
+        # ------------------------------------------------------------------
+        # Section 2: Pulling weighted samples and storing the parameters
+        # ------------------------------------------------------------------
+        
+        # Compute log10(L_IR) for valid samples (L_IR > 0)
+        valid_lir = lir_samples > 0
+        log_lir_samples = np.full(n_samples, np.nan)
+        log_lir_samples[valid_lir] = np.log10(lir_samples[valid_lir])
+        
+        # Get predicted photometry for MIRI bands + errors from the posterior samples
+        phot_miri_best   = get_model_photometry(spec, wave_spec, miri_filters, zred)
+        phot_miri_med = np.nanpercentile(phot_miri_samples, 50, axis=0)
+        phot_miri_16 = np.nanpercentile(phot_miri_samples, 16, axis=0)
+        phot_miri_84 = np.nanpercentile(phot_miri_samples, 84, axis=0)
+        phot_miri_err   = 0.5*(phot_miri_84 - phot_miri_16)          
+                    
+        print("Successfully reconstructed fit...")
+        
+        # ------------------------------------------------------------------
+        # Section 3: Reconstruct SFH
+        # ------------------------------------------------------------------
+        
+        # Reconstruct agebins used in the fits
+        tuniv = cosmo.age(zred).value
+        agelims_Myr = np.append( np.logspace( np.log10(30.0), np.log10(0.8*tuniv*1000), 12), [0.9*tuniv*1000, tuniv*1000])
+        agelims = np.concatenate( ( [0.0], np.log10(agelims_Myr*1e6) ))
+        agebins = np.array([agelims[:-1], agelims[1:]]).T
+        nbins = len(agelims) - 1
+        
+        # Collect logsfr_ratios
+        logsfr_ratios = np.array([MAP[f"logsfr_ratios_{i}"] for i in range(1, len([k for k in MAP if k.startswith("logsfr_ratios_")])+1)])        
+        
+        # Convert to SFRs
+        sfrs = logsfr_ratios_to_sfrs(logmass, logsfr_ratios, agebins)
+        
+        # Convert log age bins to linear time (yr)
+        bin_edges = 10**agebins  # shape (nbins, 2)
+        
+        # Select bins younger than a certain timescale
+        t100 = 1e8  # 100 Myr in years
+        t30 = 3e7   #  30 Myr in years
+        
+        # Compute overlap of each bin with interval [0, tcut]
+        overlap100 = np.maximum(0.0, np.minimum(bin_edges[:,1], t100) - np.minimum(bin_edges[:,0], t100))
+        overlap30 = np.maximum(0.0, np.minimum(bin_edges[:,1], t30) - np.minimum(bin_edges[:,0], t30))
+        
+        # For bins that are fully within [0,tcut] overlap == dt, partial bins get partial dt
+        sfr_100_best = np.sum(sfrs * overlap100) / t100
+        sfr_30_best = np.sum(sfrs * overlap30) / t30
+        
+        # Convert to log10(SFR)
+        log_sfr_100_best = np.log10(sfr_100_best) if sfr_100_best > 0 else np.nan
+        log_sfr_30_best  = np.log10(sfr_30_best)  if sfr_30_best  > 0 else np.nan
+
+        log_ssfr_100_best = log_sfr_100_best - logmass if np.isfinite(log_sfr_100_best) else np.nan
+        log_ssfr_30_best  = log_sfr_30_best  - logmass if np.isfinite(log_sfr_30_best)  else np.nan
+        
+        # ----------------------------------------------------------------------
+        # Compute SFR distribution across posterior samples
+        # ----------------------------------------------------------------------
+        
+        # Map theta indices for fast lookup
+        theta_names = results['theta_labels']
+        fit_params_stats = {}
+        param_chains = {}
+        
+        for idx, param_name in enumerate(theta_names):
+            # Exclude SFR ratio parameters
+            if param_name.startswith('logsfr_ratios'):
+                continue
+            
+            chain = samples[:, idx]
+            map_val = MAP.get(param_name, np.nan)
+            
+            if np.isnan(map_val):
+                print(f"⚠️ Warning: MAP value for parameter '{param_name}' is NaN. Check the results.")
+            
+            # Save the 1D sample vector (shape: n_samples,)
+            param_chains[param_name] = chain
+            
+            # Save quantiles, uncertainties, and MAP estimate
+            fit_params_stats[param_name] = summarise_chain(chain, map_value=map_val)
+        
+        logmass_idx = theta_names.index('logmass')
+        dust2_idx = theta_names.index('dust2')
+        ratio_indices = [
+            i for i, name in enumerate(theta_names) 
+            if name.startswith('logsfr_ratios_')
+        ]
+
+        log_sfr_100_samples = []
+        log_sfr_30_samples = []
+        
+        log_ssfr_100_samples = []
+        log_ssfr_30_samples = []
+        
+        dust2_samples = []
+
+        for s_params in samples:
+            s_logm = s_params[logmass_idx]
+            s_r = s_params[ratio_indices]
+                        
+            # Get SFRs for each sample using the same age bins
+            s_bins = logsfr_ratios_to_sfrs(s_logm, s_r, agebins)
+            s_sfr_100 = np.sum(s_bins * overlap100) / t100
+            s_sfr_30  = np.sum(s_bins * overlap30) / t30
+            
+            s_log_sfr_100 = np.log10(s_sfr_100) if s_sfr_100 > 0 else np.nan
+            s_log_sfr_30  = np.log10(s_sfr_30)  if s_sfr_30  > 0 else np.nan
+            
+            log_sfr_100_samples.append(s_log_sfr_100)
+            log_sfr_30_samples.append(s_log_sfr_30)
+
+            # Specific starformation rate (sSFR) = SFR / stellar mass
+            s_log_ssfr_100 = s_log_sfr_100 - s_logm if np.isfinite(s_log_sfr_100) else np.nan
+            s_log_ssfr_30 = s_log_sfr_30 - s_logm if np.isfinite(s_log_sfr_30) else np.nan
+            
+            log_ssfr_100_samples.append(s_log_ssfr_100)
+            log_ssfr_30_samples.append(s_log_ssfr_30)
+            
+        log_sfr_100_samples = np.array(log_sfr_100_samples)
+        log_sfr_30_samples = np.array(log_sfr_30_samples)
+        
+        log_ssfr_100_samples = np.array(log_ssfr_100_samples)
+        log_ssfr_30_samples = np.array(log_ssfr_30_samples)
+        
+        # Convert dust2 to A_V
+        dust2_samples = 1.086 * samples[:, dust2_idx]
+
+        # Add derived chains
+        derived_chains = {
+            'log_sfr_100myr':  log_sfr_100_samples,
+            'log_sfr_30myr':   log_sfr_30_samples,
+            'log_ssfr_100myr': log_ssfr_100_samples,
+            'log_ssfr_30myr':  log_ssfr_30_samples,
+            'A_V':             dust2_samples,
+            'log_L_ir':        log_lir_samples  # From the sample-by-sample integration loop
+        }
+        
+        # Add derived stats including percentiles
+        derived_stats = {
+            'log_sfr_100myr':  summarise_chain(log_sfr_100_samples, map_value=log_sfr_100_best),
+            'log_sfr_30myr':   summarise_chain(log_sfr_30_samples, map_value=log_sfr_30_best),
+            'log_ssfr_100myr': summarise_chain(log_ssfr_100_samples, map_value=log_ssfr_100_best),
+            'log_ssfr_30myr':  summarise_chain(log_ssfr_30_samples, map_value=log_ssfr_30_best),
+            'A_V':             summarise_chain(dust2_samples, map_value=1.086 * dust2),
+            'log_L_ir':        summarise_chain(log_lir_samples, map_value=log_lir_best)
+        }
+    
+        print("Extracted galaxy properties...")
+        
+        # ------------------------------------------------------------------
+        # Section 4: Get fit quality statistics for each band
+        # ------------------------------------------------------------------
+        fit_quality = {}
+        
+        # Compute N_sigma
+        delta = phot_miri_med - miri_obs_flux # change sign here
+        tot_err = np.sqrt(phot_miri_err**2 + miri_obs_err**2)
+        
+        # Compute N_sigma only for valid errors to avoid division by zero
+        valid_err = tot_err > 0
+        N_sigma = np.full_like(delta, np.nan)
+        N_sigma[valid_err] = delta[valid_err] / tot_err[valid_err]
+        
+        # Compute reduced chi-squared for MIRI bands
+        chi2_red_miri = np.nanmean(N_sigma**2) if np.any(np.isfinite(N_sigma)) else np.nan        
+        fit_quality['chi2_red'] = chi2_red_miri
+        
+        for i, band in enumerate(miri_band_names):         
+            
+            f_o = miri_obs_flux[i]
+            e_o = miri_obs_err[i]
+            f_m = phot_miri_best[i] # Use best-fit model flux for comparison
+            f_n = phot_miri_med[i]
+            e_m = phot_miri_err[i]
+            
+            snr = (f_o / e_o) if e_o > 0 else 0
+            
+            # Factional variance
+            frac_var = (e_m / f_m)**2 + (e_o / f_o)**2
+            rel_err = np.sqrt(frac_var)
+            
+            # Linear flux ratio + error
+            ratio = f_m / f_o
+            ratio_err = ratio * rel_err
+            
+            # Logarithmic flux ratio + error
+            log_ratio = np.log10(f_m / f_o)    
+            log_ratio_err = (1.0 / np.log(10)) * np.sqrt(frac_var)
+        
+            
+            fit_quality[band] = {
+                'galaxy_id': objid,
+                'zred': zred,
+                'obs_flux': f_o * maggies_to_muJy,
+                'obs_err': e_o * maggies_to_muJy,
+                'mod_flux_best': f_m * maggies_to_muJy,
+                'mod_flux_med': f_n * maggies_to_muJy,
+                'mod_err': e_m * maggies_to_muJy,
+                'n_sigma': N_sigma[i],
+                'ratio': ratio,
+                'ratio_err': ratio_err,
+                'log_ratio': log_ratio,
+                'log_ratio_err': log_ratio_err,
+                'snr': snr
+            }            
+        
+        print("Computed fit quality statistics")
+        
+        data = {
+            # Important metadata
+            'id': objid,
+            'zred': zred,
+            'maggies_to_muJy': maggies_to_muJy,
+            
+            'model': {
+                'spec_best': spec,
+                'spec_16th': lower,
+                'spec_median': median,
+                'spec_84th': upper,
+                'wave_spec': wave_spec,
+                'sample_specs': sample_specs[:10],
+                'phot': phot,
+                'phot_wave': phot_wave,
+                'phot_miri_best': phot_miri_best,
+                'phot_miri_med': phot_miri_med,
+                'phot_miri_16': phot_miri_16,
+                'phot_miri_84': phot_miri_84,
+                'phot_miri_err': phot_miri_err,
+                'phot_wave_miri': phot_wave_miri
+            },
+            
+            # One entry for the observation dictionary
+            'obs': obs,
+            
+            # Fit quality statistics for each MIRI band
+            'fit_quality': fit_quality,
+            
+            # Every fitted parameter from theta_labels (dust1_fraction, duste_gamma, etc.)
+            'fit_params': fit_params_stats,
+
+            # Derived integrated physical properties
+            'derived_props': derived_stats,
+
+            # 1D posterior chains for all parameters & derived quantities
+            # ** operator makes sure that all entries are stored at the same level
+            'chains': {
+                **param_chains,
+                **derived_chains
+            },
+            
+            # Moved it outside so it's easier accessible
+            'map_theta': MAP, # Keep the full raw dictionary just in case    
+            
+            # Age bins for SFH
+            'agebins': agebins
+        }
+        
+        # Write output to a pickle file
+        with open(filename, 'wb') as f:
+            pkl.dump(data, f)
+        print(f"💾 Saved data to {filename}")
+            
+        if plot_dir:
+            plot_miri_fit(filename, plot_dir)
+    
+    return 
+
+
+
+# --- Helper function for integration ---
+def _integrate_ir_lum(spec_uJy, wave_rest_um, zred):
+    """Integrates f_nu over rest-frame 8-1000 um and converts to L_sun."""
+    # Mask rest-frame 8 to 1000 um
+    mask = (wave_rest_um >= 8.0) & (wave_rest_um <= 1000.0)
+
+    if not np.any(mask):
+        return np.nan * u.L_sun
+
+    w_rest = wave_rest_um[mask] * u.um
+    f_nu = spec_uJy[mask] * u.uJy
+
+    # Comnvert to rest-frame frequency in Hz
+    fq_rest = (const.c / w_rest).to(u.Hz).value
+
+    # Integrate over frequency (reverse for positive dx)
+    f_nu_cgs = f_nu.to(u.erg / (u.s * u.cm**2 * u.Hz)).value
+    F_ir_rest = trapezoid(f_nu_cgs[::-1], fq_rest[::-1]) * (u.erg / (u.s * u.cm**2))
+
+    # Total integrated IR-flux in the observed frame
+    F_ir_obs = F_ir_rest / (1 + zred)  
+
+    # Convert flux to luminosity using luminosity distance
+    dL = cosmo.luminosity_distance(zred)
+    L_ir = (4.0 * np.pi * dL**2 * F_ir_obs).to(u.L_sun)
+
+    return L_ir.value  # Return as a float in L_sun
+    
+def summarise_chain(chain_array, map_value=np.nan):
+    """Computes 16th, 50th (median), 84th percentiles and asymmetric uncertainties."""
+    p16, p50, p84 = np.nanpercentile(chain_array, [16, 50, 84])
+    
+    return {
+        'map': float(map_value) if np.isfinite(map_value) else np.nan,
+        'median': float(p50),
+        'p16': float(p16),
+        'p84': float(p84),
+        'err_low': float(p50 - p16),
+        'err_high': float(p84 - p50)
     }
     
-    return galaxy_data
 
-
-def get_extremes(values, gids, n=2, abs=False, dropna=True):
+def extract_galaxy_data(objid, folder_path):
     """
-    Return the lowest and highest n values (with IDs).
-    
-    Parameters
-    ----------
-    values : array-like
-        Array of values (e.g. dust, nsig).
-    gids : array-like
-        IDs corresponding to the values.
-    n : int
-        Number of extremes per side.
-    dropna : bool
-        If True, filter out NaN values first.
-        
-    Returns
-    -------
-    dict with keys "lowest" and "highest", 
-    each containing list of (id, value) tuples.
+    Reads galaxy results from either .pkl or .h5 files.
+    Returns: dict with log_L_ir_median, err_low_dex, err_high_dex, dust, logmass, sfr
     """
-    vals = np.array(values)
-    ids  = np.array(gids)
-
-    if dropna:
-        mask = ~np.isnan(vals)
-        vals, ids = vals[mask], ids[mask]
-
-    if abs == True:
-        vals2 = np.abs(vals)
-    else:
-        vals2 = np.copy(vals)
+    # Pattern A: If saved as .pkl summary dictionaries
+    pkl_files = glob.glob(os.path.join(folder_path, f"*{objid}*.pkl"))
+    if len(pkl_files) > 0:
+        with open(pkl_files[0], 'rb') as f:
+            d = pkl.load(f)
             
-    order = np.argsort(vals2)
-    lowest  = [(ids[i], vals[i]) for i in order[:n]]
-    highest = [(ids[i], vals[i]) for i in order[-n:]]
+        # Example structure: adapt keys if needed
+        lir_stats = d.get('derived_props', {}).get('log_L_ir', {})
+        lir_chain = d.get('chains', {}).get('log_L_ir', {})
+        dust_stats = d.get('derived_props', {}).get('A_V', d.get('fit_params', {}).get('dust2', {}))
+        mass_stats = d.get('fit_params', {}).get('logmass', {})
+        sfr_stats = d.get('derived_props', {}).get('log_sfr_100myr', {})
+        
+        return {
+            'lir_median': lir_stats.get('median', np.nan),
+            'lir_err_low': lir_stats.get('err_low', np.nan),
+            'lir_err_high': lir_stats.get('err_high', np.nan),
+            'dust_median': dust_stats.get('median', dust_stats.get('map', np.nan)),
+            'dust_err_low': dust_stats.get('err_low', np.nan),
+            'dust_err_high': dust_stats.get('err_high', np.nan),
+            'logmass': mass_stats.get('median', np.nan),
+            'log_sfr_100myr': sfr_stats.get('median', np.nan),
+            'lir_chain': lir_chain
+        }
+        
 
-    return {"lowest": lowest, "highest": highest}
+
+
+def get_fit_params(objid, folder_path):
+    """
+    Reads galaxy results from either .pkl or .h5 files.
+    Returns: dict with log_L_ir_median, err_low_dex, err_high_dex, dust, logmass, sfr
+    """
+    # Pattern A: If saved as .pkl summary dictionaries
+    pkl_files = glob.glob(os.path.join(folder_path, f"*{objid}*.pkl"))
+    if len(pkl_files) > 0:
+        with open(pkl_files[0], 'rb') as f:
+            d = pkl.load(f)
+            
+        # Example structure: adapt keys if needed
+        fit_params = d.get('fit_params', {})

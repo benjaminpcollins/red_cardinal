@@ -1,0 +1,509 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Download, Upload, Palette, BarChart3 } from 'lucide-react';
+
+const GalaxyPlotter = () => {
+  const [plotType, setPlotType] = useState('mass_redshift');
+  const [colorScheme, setColorScheme] = useState('viridis');
+  const [data, setData] = useState(null);
+  const canvasRef = useRef(null);
+  
+  // Sample data generator (you'll replace this with your actual data)
+  const generateSampleData = () => {
+    const n = 150;
+    const galaxies = [];
+    
+    for (let i = 0; i < n; i++) {
+      const z = 1.5 + Math.random() * 1.5; // z between 1.5-3
+      const logmass = 9 + Math.random() * 2; // log mass between 9-11
+      const mass = Math.pow(10, logmass);
+      
+      // SFR roughly following main sequence with scatter
+      const logsfr = 0.8 * logmass - 8.5 + (Math.random() - 0.5) * 0.8;
+      const sfr = Math.pow(10, logsfr);
+      
+      // Number of detections (0-4)
+      const ndetections = Math.floor(Math.random() * 5);
+      
+      galaxies.push({
+        id: i,
+        z: z,
+        logmass: logmass,
+        mass: mass,
+        sfr: sfr,
+        ndetections: ndetections,
+        detected: ndetections > 0
+      });
+    }
+    
+    return galaxies;
+  };
+
+  const colorSchemes = {
+    viridis: ['#440154', '#31688e', '#35b779', '#fde725'],
+    plasma: ['#0d0887', '#7e03a8', '#cc4678', '#f89441', '#f0f921'],
+    cool: ['#3182bd', '#6baed6', '#9ecae1', '#c6dbef'],
+    warm: ['#d73027', '#f46d43', '#fdae61', '#fee08b'],
+    scientific: ['#2166ac', '#4393c3', '#92c5de', '#d1e5f0', '#f7f7f7', '#fddbc7', '#f4a582', '#d6604d', '#b2182b']
+  };
+
+  useEffect(() => {
+  fetch('/Users/benjamincollins/University/Master/Red_Cardinal/prospector/sample_stats/plot_data.json')
+    .then(res => res.json())
+    .then(jsonData => setData(jsonData))
+    .catch(err => console.error(err));
+}, []);
+
+
+    const plotData = data || [];
+
+  const drawPlot = () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    
+    const ctx = canvas.getContext('2d');
+    const width = 800;
+    const height = 600;
+    canvas.width = width;
+    canvas.height = height;
+    
+    // Clear canvas
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, height);
+    
+    // Set up margins
+    const margin = { top: 60, right: 120, bottom: 80, left: 100 };
+    const plotWidth = width - margin.left - margin.right;
+    const plotHeight = height - margin.top - margin.bottom;
+    
+    // Determine x and y data based on plot type
+    let xData, yData, xLabel, yLabel, title;
+    
+    if (plotType === 'mass_redshift') {
+      xData = plotData.map(d => d.z);
+      yData = plotData.map(d => d.mass);
+      xLabel = 'Redshift (z)';
+      yLabel = 'Stellar Mass (M☉)';
+      title = 'Stellar Mass vs Redshift';
+    } else if (plotType === 'main_sequence') {
+      xData = plotData.map(d => d.mass);
+      yData = plotData.map(d => d.sfr);
+      xLabel = 'Stellar Mass (M☉)';
+      yLabel = 'SFR₁₀₀ₘᵧᵣ (M☉/yr)';
+      title = 'Star-Forming Main Sequence';
+    } else { // z_mass_param
+      xData = plotData.map(d => d.z);
+      yData = plotData.map(d => d.logmass);
+      xLabel = 'Redshift (z)';
+      yLabel = 'log₁₀(M★/M☉)';
+      title = 'z-M Parameter Space';
+    }
+    
+    // Calculate scales
+    const xMin = Math.min(...xData);
+    const xMax = Math.max(...xData);
+    const yMin = Math.min(...yData);
+    const yMax = Math.max(...yData);
+    
+    // Add padding
+    const xPadding = (xMax - xMin) * 0.05;
+    const yPadding = plotType === 'z_mass_param' ? (yMax - yMin) * 0.05 : 0;
+    
+    const xScale = (x) => margin.left + ((x - xMin + xPadding) / (xMax - xMin + 2*xPadding)) * plotWidth;
+    const yScale = (y) => {
+      if (plotType === 'z_mass_param') {
+        return margin.top + (1 - (y - yMin + yPadding) / (yMax - yMin + 2*yPadding)) * plotHeight;
+      } else {
+        // Log scale for mass and SFR plots
+        const logY = Math.log10(y);
+        const logYMin = Math.log10(yMin);
+        const logYMax = Math.log10(yMax);
+        return margin.top + (1 - (logY - logYMin) / (logYMax - logYMin)) * plotHeight;
+      }
+    };
+    
+    // Draw grid
+    ctx.strokeStyle = '#e0e0e0';
+    ctx.lineWidth = 1;
+    for (let i = 0; i <= 10; i++) {
+      const x = margin.left + (i / 10) * plotWidth;
+      const y = margin.top + (i / 10) * plotHeight;
+      
+      ctx.beginPath();
+      ctx.moveTo(x, margin.top);
+      ctx.lineTo(x, margin.top + plotHeight);
+      ctx.stroke();
+      
+      ctx.beginPath();
+      ctx.moveTo(margin.left, y);
+      ctx.lineTo(margin.left + plotWidth, y);
+      ctx.stroke();
+    }
+    
+    // Draw axes
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(margin.left, margin.top + plotHeight);
+    ctx.lineTo(margin.left + plotWidth, margin.top + plotHeight);
+    ctx.moveTo(margin.left, margin.top);
+    ctx.lineTo(margin.left, margin.top + plotHeight);
+    ctx.stroke();
+    
+    // Get colors for detections
+    const colors = colorSchemes[colorScheme];
+    
+    // Draw points
+    plotData.forEach((d, i) => {
+      const x = xScale(xData[i]);
+      const y = yScale(yData[i]);
+      
+      let color;
+      if (plotType === 'mass_redshift') {
+        color = d.detected ? '#ff7f0e' : '#808080';
+      } else {
+        const colorIndex = Math.min(d.ndetections, colors.length - 1);
+        color = colors[colorIndex];
+      }
+      
+      // Draw point with border
+      ctx.fillStyle = color;
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 1;
+      
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+    });
+    
+    // Draw labels and title
+    ctx.fillStyle = '#000000';
+    ctx.font = '16px Arial';
+    ctx.textAlign = 'center';
+    
+    // Title
+    ctx.font = 'bold 20px Arial';
+    ctx.fillText(title, width / 2, 30);
+    
+    // X label
+    ctx.font = '16px Arial';
+    ctx.fillText(xLabel, width / 2, height - 20);
+    
+    // Y label (rotated)
+    ctx.save();
+    ctx.translate(20, height / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillText(yLabel, 0, 0);
+    ctx.restore();
+    
+    // Draw legend
+    if (plotType === 'mass_redshift') {
+      const legendX = width - 110;
+      let legendY = 100;
+      
+      ctx.font = '14px Arial';
+      ctx.textAlign = 'left';
+      
+      // Detected
+      ctx.fillStyle = '#ff7f0e';
+      ctx.beginPath();
+      ctx.arc(legendX, legendY, 4, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.strokeStyle = '#000000';
+      ctx.stroke();
+      
+      ctx.fillStyle = '#000000';
+      ctx.fillText('MIRI detections', legendX + 15, legendY + 5);
+      
+      // Non-detected
+      legendY += 25;
+      ctx.fillStyle = '#808080';
+      ctx.beginPath();
+      ctx.arc(legendX, legendY, 4, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.strokeStyle = '#000000';
+      ctx.stroke();
+      
+      ctx.fillStyle = '#000000';
+      ctx.fillText('No detections', legendX + 15, legendY + 5);
+      
+    } else {
+      // Color bar for number of detections
+      const colorBarX = width - 100;
+      const colorBarY = 100;
+      const colorBarWidth = 20;
+      const colorBarHeight = 150;
+      
+      for (let i = 0; i < colors.length; i++) {
+        const y = colorBarY + (i / (colors.length - 1)) * colorBarHeight;
+        const height = colorBarHeight / colors.length;
+        
+        ctx.fillStyle = colors[i];
+        ctx.fillRect(colorBarX, y, colorBarWidth, height);
+        
+        ctx.fillStyle = '#000000';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'left';
+        ctx.fillText(i.toString(), colorBarX + 25, y + height/2 + 4);
+      }
+      
+      ctx.font = '14px Arial';
+      ctx.textAlign = 'center';
+      ctx.save();
+      ctx.translate(colorBarX + colorBarWidth + 50, colorBarY + colorBarHeight/2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText('MIRI Detections', 0, 0);
+      ctx.restore();
+    }
+  };
+
+  useEffect(() => {
+    drawPlot();
+  }, [plotType, colorScheme, data]);
+
+  const downloadPlot = () => {
+    const canvas = canvasRef.current;
+    const link = document.createElement('a');
+    link.download = `galaxy_${plotType}.png`;
+    link.href = canvas.toDataURL();
+    link.click();
+  };
+
+  const generateCode = () => {
+    const codeTemplate = `
+import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.colors import ListedColormap
+
+# Set up the plot style for publication quality
+plt.rcParams.update({
+    'font.size': 12,
+    'font.family': 'serif',
+    'axes.linewidth': 1.5,
+    'axes.spines.top': False,
+    'axes.spines.right': False,
+    'xtick.major.size': 6,
+    'ytick.major.size': 6,
+    'xtick.major.width': 1.5,
+    'ytick.major.width': 1.5,
+    'grid.alpha': 0.3,
+    'grid.linewidth': 0.8
+})
+
+# Define your data arrays (replace with your actual data)
+# zreds, logmasses, masses, sfr100, ndetections = your_data_arrays
+
+${plotType === 'mass_redshift' ? `
+# Plot 1: Mass vs Redshift with detection status
+fig, ax = plt.subplots(figsize=(10, 6))
+
+detected = ndetections > 0
+ax.scatter(zreds[detected], masses[detected], 
+          s=80, alpha=0.8, color='#ff7f0e', 
+          edgecolor='black', linewidth=0.5,
+          label='MIRI detections', zorder=3)
+
+ax.scatter(zreds[~detected], masses[~detected], 
+          s=80, alpha=0.6, color='#808080',
+          edgecolor='black', linewidth=0.5,
+          label='No detections', zorder=2)
+
+ax.set_xlabel('Redshift (z)', fontsize=14)
+ax.set_ylabel('Stellar Mass (M$_\\odot$)', fontsize=14)
+ax.set_yscale('log')
+ax.set_title('Stellar Mass vs Redshift', fontsize=16, fontweight='bold', pad=20)
+ax.grid(True, alpha=0.3)
+ax.legend(frameon=True, fancybox=True, shadow=True)
+plt.tight_layout()
+plt.savefig('mass_vs_redshift.png', dpi=300, bbox_inches='tight')
+plt.show()
+` : plotType === 'main_sequence' ? `
+# Plot 2: Star-forming Main Sequence
+fig, ax = plt.subplots(figsize=(10, 8))
+
+# Create custom colormap
+colors_${colorScheme} = ${JSON.stringify(colorSchemes[colorScheme])}
+cmap = ListedColormap(colors_${colorScheme})
+
+sc = ax.scatter(masses, sfr100, c=ndetections, 
+               cmap=cmap, s=80, alpha=0.8,
+               edgecolor='black', linewidth=0.5,
+               vmin=0, vmax=${colorSchemes[colorScheme].length - 1})
+
+ax.set_xlabel('Stellar Mass (M$_\\odot$)', fontsize=14)
+ax.set_ylabel('SFR$_{100 Myr}$ (M$_\\odot$ yr$^{-1}$)', fontsize=14)
+ax.set_xscale('log')
+ax.set_yscale('log')
+ax.set_title('Star-Forming Main Sequence', fontsize=16, fontweight='bold', pad=20)
+ax.grid(True, alpha=0.3)
+
+# Colorbar
+cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
+cbar.set_label('Number of MIRI Detections', fontsize=12)
+cbar.set_ticks(np.arange(0, ${colorSchemes[colorScheme].length}))
+
+plt.tight_layout()
+plt.savefig('main_sequence.png', dpi=300, bbox_inches='tight')
+plt.show()
+` : `
+# Plot 3: z-M Parameter Space
+fig, ax = plt.subplots(figsize=(10, 8))
+
+# Create custom colormap
+colors_${colorScheme} = ${JSON.stringify(colorSchemes[colorScheme])}
+cmap = ListedColormap(colors_${colorScheme})
+
+sc = ax.scatter(zreds, logmasses, c=ndetections, 
+               cmap=cmap, s=80, alpha=0.8,
+               edgecolor='black', linewidth=0.5,
+               vmin=0, vmax=${colorSchemes[colorScheme].length - 1})
+
+ax.set_xlabel('Redshift (z)', fontsize=14)
+ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
+ax.set_title('z-M Parameter Space', fontsize=16, fontweight='bold', pad=20)
+ax.grid(True, alpha=0.3)
+
+# Colorbar
+cbar = plt.colorbar(sc, ax=ax, shrink=0.8)
+cbar.set_label('Number of MIRI Detections', fontsize=12)
+cbar.set_ticks(np.arange(0, ${colorSchemes[colorScheme].length}))
+
+plt.tight_layout()
+plt.savefig('z_m_parameter_space.png', dpi=300, bbox_inches='tight')
+plt.show()
+`}`;
+
+    navigator.clipboard.writeText(codeTemplate.trim());
+    alert('Code copied to clipboard!');
+  };
+
+  return (
+    <div className="w-full max-w-6xl mx-auto p-6 bg-gray-50 rounded-lg">
+      <div className="mb-6">
+        <h1 className="text-3xl font-bold text-gray-800 mb-2 flex items-center gap-2">
+          <BarChart3 className="text-blue-600" />
+          Galaxy Sample Plotter
+        </h1>
+        <p className="text-gray-600">Create publication-ready plots for your galaxy sample analysis</p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+        <div className="lg:col-span-1 space-y-4">
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <BarChart3 className="w-4 h-4" />
+              Plot Type
+            </h3>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  value="mass_redshift"
+                  checked={plotType === 'mass_redshift'}
+                  onChange={(e) => setPlotType(e.target.value)}
+                  className="text-blue-600"
+                />
+                <span className="text-sm">Mass vs Redshift</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  value="main_sequence"
+                  checked={plotType === 'main_sequence'}
+                  onChange={(e) => setPlotType(e.target.value)}
+                  className="text-blue-600"
+                />
+                <span className="text-sm">Main Sequence</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  value="z_mass_param"
+                  checked={plotType === 'z_mass_param'}
+                  onChange={(e) => setPlotType(e.target.value)}
+                  className="text-blue-600"
+                />
+                <span className="text-sm">z-M Parameter Space</span>
+              </label>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <h3 className="font-semibold mb-3 flex items-center gap-2">
+              <Palette className="w-4 h-4" />
+              Color Scheme
+            </h3>
+            <select
+              value={colorScheme}
+              onChange={(e) => setColorScheme(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-md text-sm"
+            >
+              <option value="viridis">Viridis</option>
+              <option value="plasma">Plasma</option>
+              <option value="cool">Cool</option>
+              <option value="warm">Warm</option>
+              <option value="scientific">Scientific</option>
+            </select>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <h3 className="font-semibold mb-3">Actions</h3>
+            <div className="space-y-2">
+              <button
+                onClick={downloadPlot}
+                className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white px-3 py-2 rounded-md hover:bg-blue-700 transition-colors text-sm"
+              >
+                <Download className="w-4 h-4" />
+                Download Plot
+              </button>
+              <button
+                onClick={generateCode}
+                className="w-full flex items-center justify-center gap-2 bg-green-600 text-white px-3 py-2 rounded-md hover:bg-green-700 transition-colors text-sm"
+              >
+                <Upload className="w-4 h-4" />
+                Copy Code
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <h3 className="font-semibold mb-2 text-sm">Sample Statistics</h3>
+            <div className="text-xs text-gray-600 space-y-1">
+              <div>Total galaxies: {plotData.length}</div>
+              <div>Detected: {plotData.filter(d => d.detected).length}</div>
+              <div>Non-detected: {plotData.filter(d => !d.detected).length}</div>
+              <div>z range: 1.5 - 3.0</div>
+              <div>M range: 10⁹ - 10¹¹ M☉</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="lg:col-span-3">
+          <div className="bg-white p-4 rounded-lg shadow-sm">
+            <canvas
+              ref={canvasRef}
+              className="w-full border border-gray-200 rounded"
+              style={{ maxWidth: '100%', height: 'auto' }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-6 bg-white p-4 rounded-lg shadow-sm">
+        <h3 className="font-semibold mb-2">How to use with your data:</h3>
+        <ol className="text-sm text-gray-600 space-y-1 list-decimal list-inside">
+          <li>Select your desired plot type and color scheme above</li>
+          <li>Click "Copy Code" to get publication-ready matplotlib code</li>
+          <li>Replace the placeholder data arrays with your actual arrays (zreds, logmasses, masses, sfr100, ndetections)</li>
+          <li>Run the code to generate high-quality plots for your publication</li>
+        </ol>
+        <p className="text-xs text-gray-500 mt-2">
+          The preview above uses simulated data matching your sample characteristics (z=1.5-3, M>10⁹M☉)
+        </p>
+      </div>
+    </div>
+  );
+};
+
+export default GalaxyPlotter;

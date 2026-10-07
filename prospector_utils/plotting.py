@@ -6,289 +6,22 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from matplotlib.colors import Normalize, ListedColormap
 import pickle as pkl
-from datetime import datetime
-from scipy.stats import norm
-import prospect.io.read_results as reader
-from prospect.sources import FastStepBasis
-from prospect.utils.plotting import posterior_samples
-from .params import build_obs, build_model, get_MAP
+from scipy.stats import norm, median_abs_deviation
+
 from astropy.cosmology import Planck18 as cosmo
 from astropy import units as u
+
+from astropy.table import Table
 
 from astropy.io import fits
 from astropy.visualization import ZScaleInterval, ImageNormalize, AsinhStretch
 
 from matplotlib.image import imread
 
-# This script is designed to work with PROSPECTOR results and MIRI photometry data.
 
-dirout = "/Users/benjamincollins/University/master/Red_Cardinal/prospector/outputs/"
-
-
-def reconstruct(objid, plot_dir=None, stats_dir=None, add_duste=True):
-    """Main function to reconstruct and plot PROSPECTOR results with MIRI data
-    
-    Parameters:
-    -----------
-    objid : int
-        Galaxy ID of the object of interest
-    plot_dir : str, optional
-        Directory to store the plots in
-    stats_dir : str, optional
-        Directory to write the fit statistics to
-    add_duste : bool, optional
-        Specify whether dust emission is active or not
-        Defaults to True
-    """
-    
-    print(f"Processing galaxy {objid} =============================")
-    
-    # Load the h5 file for the given objid
-    h5_file = glob.glob(os.path.join(dirout, f"output_{objid}*.h5"))
-    
-    try:
-        h5_file = h5_file[0]
-    except IndexError:
-        print(f"No PROSPECTOR results found for objid {objid}.")
-        return None
-
-    # Load PROSPECTOR results
-    full_path = os.path.join(dirout, h5_file)
-    results, loaded_obs, loaded_model = reader.results_from(full_path)
-    
-    # Build new observations including MIRI
-    obs = build_obs(objid)
-    
-    # Now we have to exclude the last 3 parameters from the fit
-    map_parameters = get_MAP(results)
-    
-    original_theta_labels = results['theta_labels']
-    original_map_parameters = map_parameters.copy()  # Keep original for reference
-    
-    # Build the MAP dictionary
-    MAP = {}
-    for a,b in zip(results['theta_labels'], map_parameters):
-        MAP[a] = b
-    
-    # Section to decide whether to include dust emission or not
-    if add_duste == True:
-        map_parameters = map_parameters[:-3]
-        add_duste = results['run_params']['add_duste']
-        add_agn = results['run_params']['add_agn']  # Maybe check if this is True?
-    else:
-        map_parameters = map_parameters[:-6]
-        add_agn = False
-        
-    # Get accurate redshifts from the MAP (obtained by MJ)    
-    zred = map_parameters[0]
-
-    # Build model matching original setup    
-    # Somehow this works if zred=objid and waverange=zred, but not if I pass the arguments correctly
-    model = build_model(zred=zred,
-                        waverange=None,
-                        add_duste=add_duste,
-                        add_neb=False,  # Set add_neb to False
-                        add_agn=add_agn,
-                        fit_afe=results['run_params']['fit_afe']
-                        )
-    
-    model.params['polyorder'] = 10
-
-    #print("New model.ndim:", model.ndim)
-    #print("New model.theta_index:", model.theta_index)
-    #print("New model theta_labels:", [model.theta_labels()[i] for i in range(model.ndim)])
-
-    # Map parameters from original fit to new model structure
-    new_theta_labels = [model.theta_labels()[i] for i in range(model.ndim)]
-    new_map_parameters = []
-    
-    # Create mapping between old and new parameter structures
-    for new_label in new_theta_labels:
-        if new_label in original_theta_labels:
-            old_idx = original_theta_labels.index(new_label)
-            new_map_parameters.append(original_map_parameters[old_idx])
-            #print(f"Mapped {new_label}: {original_map_parameters[old_idx]}")
-        else:
-            # This shouldn't happen if we're just removing dust parameters
-            print(f"Warning: {new_label} not found in original parameters")
-            new_map_parameters.append(0.0)  # Default value
-
-    new_map_parameters = np.array(new_map_parameters)
-
-    #print(f"Original parameters length: {len(original_map_parameters)}")
-    #print(f"New parameters length: {len(new_map_parameters)}")
-    #print(f"New model expects: {model.ndim} parameters")
-    
-    for a,b in zip(results['theta_labels'],map_parameters):
-        print(a, b)
-    
-    #print("Adjusted length of map_parameters: ", len(map_parameters), "\n")
-
-    # Calculate the spectrum based on the Maximum A Posteriori (MAP) parameters
-    sps = FastStepBasis(zcontinuous=1)
-
-    # Obtain best fit model spectrum and model photometry    
-    spec, phot, _ = model.predict(map_parameters, obs=obs, sps=sps)
-    
-    maggies_to_muJy = 3631e6 # maggies to µJy conversion factor
-    
-    # wavelengths of the model spectrum
-    wave_spec = sps.wavelengths
-    wave_spec_rs = sps.wavelengths * 1e-4 * (1 + zred)   # convert to µm, redshifted    
-    
-    # Convert to arrays
-    phot = np.array(phot)
-    maggies = np.array(obs['maggies'])
-    maggies_unc = np.array(obs['maggies_unc'])
-
-    assert len(phot) == len(maggies), 'Model photometry does not match observed photometry length'
-    
-    # Compute ratio and weights
-    ratio = maggies / phot
-    weights = 1.0 / maggies_unc**2
-
-    # Weighted average correction factor
-    corr_factor = np.sum(ratio * weights) / np.sum(weights)
-
-    # Compute uncertainty on correction factor
-    residuals = ratio - corr_factor
-    weighted_var = np.sum(weights * residuals**2) / np.sum(weights)
-    corr_uncertainty = np.sqrt(weighted_var / len(ratio))
-        
-    # Initialise the plot
-    fig, ax = plt.subplots(figsize=(8, 5))
-    
-    #########   PLOT POSTERIOR SAMPLES     #########
-    
-    nsample = 100
-    samples = posterior_samples(results, nsample)
-    
-    all_specs = []
-    for params_i in samples:
-        params_i = params_i[:-3]
-        spec_i, _, _ = model.predict(params_i, obs=obs, sps=sps)
-        all_specs.append(spec_i)
-        
-    all_specs = np.array(all_specs)  # shape: (nsample, nwave)
-    
-    # Takes the per-pixel percentiles such that the final spectra are not actual spectra of Prospectors parameter space
-    lower = np.percentile(all_specs, 16, axis=0)
-    median = np.percentile(all_specs, 50, axis=0)
-    upper = np.percentile(all_specs, 84, axis=0)
-    
-    # Convert to µJy
-    lower_scaled = lower * maggies_to_muJy    
-    median_scaled = median * maggies_to_muJy
-    upper_scaled = upper * maggies_to_muJy
-    
-    # Plot shaded region for 1σ uncertainty
-    ax.fill_between(wave_spec_rs, lower_scaled, upper_scaled, color='crimson', alpha=0.2, label='1σ uncertainty')
-    
-    for i in range(10):
-        ax.plot(wave_spec_rs, all_specs[i]*maggies_to_muJy, color='crimson', alpha=0.15, lw=0.8)
-    
-    #ax.plot(wave_spec_rs, lower_scaled, color='blue', lw=0.8, label='16th percentile')
-    #ax.plot(wave_spec_rs, upper_scaled, color='blue', lw=0.8, label='84th percentile')
-    #########       PLOT THE BEST FIT      #########
-    
-    spec_scaled = spec * maggies_to_muJy    # convert to µJy
-    ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
-    
-    #########    PLOT MODEL PHOTOMETRY     #########
-    
-    wave_phot = np.array([filt.wave_effective for filt in obs['filters']])  # in Angstroms
-    wave_phot_microns = wave_phot * 1e-4  # convert to µm
-    phot_scaled = phot * maggies_to_muJy  # convert maggies to µJy
-    ax.plot(wave_phot_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
-    
-    #########  PLOT MEASURED PHOTOMETRY    #########
-
-    plot_photometry(ax, obs)
-    # Thanks to the function this is literally a one-liner now
-    
-    # Compute bounds
-    wave_mask = (wave_spec_rs >= 0.4) & (wave_spec_rs <= 35)
-    
-    # Apply mask to spectrum(s)
-    spec_within = spec_scaled[wave_mask]  # works for 1D or 2D (e.g. percentiles)
-    spec_within = [ele for ele in spec_within if ele > 0]
-
-    # Compute y-axis limits
-    ymin = np.nanmin(spec_within)
-    ymax = np.nanmax(spec_within)
-    
-    # Add margin proportionally, protecting against log-scale issues
-    ymin_plot = ymin * 0.2  # reduce, but stay > 0
-    ymax_plot = ymax * 5   # increase
-
-    # Set limits
-    ax.set_ylim(ymin_plot, ymax_plot)
-
-    # Plot formatting
-    ax.set_xlabel('Observed Wavelength (µm)', fontsize=13)
-    ax.set_ylabel('Flux (µJy)', fontsize=13)
-    ax.set_xlim(0.4, 35)#200)    # Change x range    
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.legend()
-    ax.tick_params(axis='both', which='major', labelsize=13)
-
-    
-    zred_rounded = np.round(zred,2)
-    #plt.title(f"Galaxy {objid} at z={zred_rounded}")
-    plt.tight_layout()
-    
-    if plot_dir:
-        os.makedirs(plot_dir, exist_ok=True)
-        fname = os.path.join(plot_dir, f'{objid}.png')
-        plt.savefig(fname)
-    plt.show()
-    plt.close()
-    
-    if stats_dir:
-        os.makedirs(stats_dir, exist_ok=True)
-    
-        filename = os.path.join(stats_dir, f"{objid}.pkl")
-        
-        fit_data = {
-            # One entry for the model spectrum + photometry
-            'model': {
-                'spec_bestfit': spec,
-                'spec_16th': lower,
-                'spec_50th': median,
-                'spec_84th': upper,
-                'wave_spec': wave_spec,
-                'phot': phot,
-                'wave_phot': wave_phot
-            },
-            
-            # One entry for the observation dictionary
-            'obs': obs,
-            
-            # Alignment between the model and observed photometry
-            'alignment': {
-                'ratio': ratio,
-                'corr_factor': corr_factor,
-                'corr_uncertainty': corr_uncertainty,
-                'weights': weights,
-                'maggies_to_muJy': maggies_to_muJy
-            },
-
-            # Remaining useful data
-            'galaxy_id': objid,
-            'redshift': zred,
-            'saved_at': datetime.now().isoformat()
-        }
-        
-        # Write output to a pickle file
-        with open(filename, 'wb') as f:
-            pkl.dump(fit_data, f)
-
-    if plot_dir:
-        print(f"✅ Plot saved to {fname}")
-    if stats_dir:    
-        print(f"✅ Fit results saved to: {filename}")
-    
+quiescent = [7549, 8013, 8469, 9395, 10128, 10339, 10400, 10565, 10592, 11142, 11494, 16419, 18668, 21477]
+below_ms = [10600, 18977, 21451]
+no_spec = [9517, 9809, 11051, 11451, 12133, 17713, 17984, 20195, 20693, 20720, 21472, 22990]
 
 def plot_transmission_curves(ax, filters):
     """Plot the transmission curves of the given filters on the provided axis."""
@@ -303,29 +36,44 @@ def plot_photometry(ax, obs, factor=3631e6):
     
     # Define the style per instrument
     instrument_styles = {
-        'acs':     {'color': 'royalblue',   'marker': 'o', 'edgecolor': 'black', 'label': 'HST ACS', 'ms': 10},
-        'wfc3':    {'color': 'limegreen',  'marker': 'o', 'edgecolor': 'black', 'label': 'HST WFC3', 'ms': 10},
-        'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST NIRCam', 'ms': 10},
-        'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST MIRI (overlaid)', 'ms': 10}
+        'acs':     {'color': 'royalblue',   'marker': 'o', 'edgecolor': 'black', 'label': 'HST/ACS', 'ms': 10},
+        'wfc3':    {'color': 'limegreen',  'marker': 'o', 'edgecolor': 'black', 'label': 'HST/WFC3', 'ms': 10},
+        'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST/NIRCam', 'ms': 10},
+        'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST/MIRI (not used in fit)', 'ms': 10}
     }
     
+    # Get current labels to prevent duplicates
+    _, labels = ax.get_legend_handles_labels()
+    
+    obs_phot = []
+    
     for i, filt in enumerate(obs['filters_all']):
+        
+        wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
+        flux = obs['maggies_all'][i] * factor  # µJy
+        err  = obs['maggies_unc_all'][i] * factor  # µJy
+        
+        uplims = False
+        
         name = filt.name.lower()
-
-        if 'acs' in name:
+        
+        if 'acs_wfc' in name:
             style = instrument_styles['acs']
-        elif 'wfc3' in name:
+        elif 'wfc3_ir' in name:
             style = instrument_styles['wfc3']
         elif 'miri' in name or any(m in name for m in ['f770w', 'f1000w', 'f1800w', 'f2100w']):
             style = instrument_styles['miri']
+            # Improved Upper Limit Logic for MIRI
+            if (flux / err < 3.0):
+                uplims = True
+                flux = 3 * err # Plot at 3-sigma
+                err = flux * 0.4 # Small arrow size for visualisation
+            
         elif 'nircam' in name or ('jwst' in name and 'f' in name and 'w' in name):
             style = instrument_styles['nircam']
         else:
             continue  # skip unknown filters
 
-        wave = obs['phot_wave_all'][i] * 1e-4  # convert to µm
-        flux = obs['maggies_all'][i] * factor  # µJy
-        err  = obs['maggies_unc_all'][i] * factor  # µJy
 
         ax.errorbar(
             wave, flux, yerr=err,
@@ -334,112 +82,99 @@ def plot_photometry(ax, obs, factor=3631e6):
             markeredgecolor=style.get('edgecolor', 'none'),
             alpha=style.get('alpha', 1.0),
             markersize=10,
-            label=style['label'] if style['label'] not in ax.get_legend_handles_labels()[1] else None
+            uplims=uplims, # This creates the actual downward arrow
+            label=style['label'] if style['label'] not in labels else None
         )
         
+        # Update labels list to prevent duplicates in current loop
+        if style['label'] not in labels:
+            labels.append(style['label'])
         
+        obs_phot.append(flux)
+        
+    return obs_phot
 
-def load_and_display(objid, duste=False, mod=None, mod_err=None, outfile=None):
-    """Code to load the fit data from the reconstruct function and plot 
-       quickly without using predict() 
-
-    Args:
-        objid (int): Object ID of the galaxy of interest
-        duste (bool, optional): Specify whether to load files with or without 
-                                dust emission. Defaults to False.
-        mod (ndarray, optional): Model photometry. Defaults to None.
-        mod_err (ndarray, optional): Model uncertainty. Defaults to None.
-        outfile (str, optional): Path to output figure. Defaults to None.
-        
-    Note:  
-        mod and mod_err are only relevant if you want to include your custom model 
-            photometry, e.g. using sedpy to create phototmetry for bands that were
-            not used to fit and hence prospector doesn't return a model for them.
-        
-       
-    """
+def plot_reconstructed_fit(filename, plot_dir=None):
     
-    if duste == False:
-        path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_files/{objid}.pkl'
-    else:
-        path_to_pkl = f'/Users/benjamincollins/University/Master/Red_Cardinal/prospector/pickle_nodust/{objid}.pkl'
-
     try:    # try to open
-        with open(path_to_pkl, 'rb') as f:
+        with open(filename, 'rb') as f:
             fit_data = pkl.load(f)
     except FileNotFoundError:
-        print(f"⚠️ Attention: File {path_to_pkl} not found. Skipping...")
-        return
+        print(f"⚠️ Attention: File {filename} not found. Skipping...")
+        return 
     
-    zred = fit_data['redshift']
-    print(f"Loading fit data of galaxy {objid} at redshift {zred}")
+    gid = fit_data['id']
+    zred = fit_data['zred']
     
-    # Load model spectra
-    spec = fit_data['model']['spec_bestfit']
-    lower = fit_data['model']['spec_16th']
-    median = fit_data['model']['spec_50th']
-    upper = fit_data['model']['spec_84th']
-    wave_spec = fit_data['model']['wave_spec']
+    model = fit_data['model']
+    spec_best = model['spec_best']
+    spec_16th = model['spec_16th']
+    spec_median = model['spec_median']
+    spec_84th = model['spec_84th']
+    wave_spec = model['wave_spec']
+    sample_specs = model['sample_specs']
+    phot = model['phot']
+    phot_miri = model['phot_miri_best']
+    phot_miri_err = model['phot_miri_err']
+    phot_wave = model['phot_wave']
+    phot_wave_miri = model['phot_wave_miri']
     
-    # Load model photometry
-    phot = fit_data['model']['phot']
-    wave_phot = fit_data['model']['wave_phot']
-    
-    # Load observation dictionary
     obs = fit_data['obs']
+    maggies_to_muJy = fit_data['maggies_to_muJy']
     
-    factor = 3631e6  # maggies to µJy conversion factor
+    # Convert to µJy
+    lower_scaled = spec_16th * maggies_to_muJy    
+    median_scaled = spec_median * maggies_to_muJy
+    upper_scaled = spec_84th * maggies_to_muJy
+    spec_scaled = spec_best * maggies_to_muJy
     
-    wave_spec = wave_spec * 1e-4 * (1 + zred)
-    spec *= factor # convert to µJy
-    median *= factor
-    lower *= factor
-    upper *= factor
+    phot_wave_microns = phot_wave * 1e-4  # convert to µm
+    phot_wave_miri_microns = phot_wave_miri * 1e-4  # convert to µm
     
-    wave_phot = wave_phot * 1e-4 # convert to microns
-    phot *= factor  # convert to µJy
+    phot_scaled = phot * maggies_to_muJy
+    phot_miri_scaled = phot_miri * maggies_to_muJy
+    phot_miri_err_scaled = phot_miri_err * maggies_to_muJy
+    
+    wave_spec_rs = wave_spec * 1e-4 * (1+zred)
     
     # Initialise the plot
     fig, ax = plt.subplots(figsize=(8, 5))
-
-    # Plot 1 sigma confidence interval
-    ax.fill_between(wave_spec, lower, upper, color='crimson', alpha=0.2, label='1σ uncertainty')
-
-    # Optional: Plot median spectrum
-    ax.plot(wave_spec, median, color='crimson', alpha=0.5, lw=0.8, label="Median model")
     
-    # Plot bestfit spectrum
-    ax.plot(wave_spec, spec, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
-
-    # Plot model photometry
-    ax.plot(wave_phot, phot, 'd', markersize=6, color='black', label='Model photometry (Prospector)')
-
-    # Plot model photometry created with sedpy
-    if mod is not None and mod_err is not None:
-        # Plot provided photometry with error bars
-        wave_phot_all = obs['phot_wave_all'] * 1e-4  # convert to microns
-        
-        miri_mask = (wave_phot_all > 7) & (wave_phot_all < 25)  # AA
-        wave_phot_all = wave_phot_all[miri_mask]
-        mod_err = np.full_like(mod, mod_err)  # Ensure phot_err is the same length as phot
-                
-        ax.errorbar(wave_phot_all, mod*factor, yerr=mod_err*factor, fmt='d', color='blue', label='Model photometry (Sedpy)', markersize=6)
-        plot_dir = "/Users/benjamincollins/University/Master/Red_Cardinal/prospector/fits/"
-        os.makedirs(plot_dir, exist_ok=True)
-        filename = os.path.join(plot_dir, f"{objid}.png")
+    # Plot shaded region for 1σ uncertainty
+    ax.fill_between(wave_spec_rs, lower_scaled, upper_scaled, color='crimson', alpha=0.2, label='1σ uncertainty')
     
-    # Plot measured photometry
-    plot_photometry(ax, obs)
+    for spec in sample_specs:
+        ax.plot(wave_spec_rs, spec*maggies_to_muJy, color='crimson', alpha=0.15, lw=0.8)
+    
+    #ax.plot(wave_spec_rs, lower_scaled, color='blue', lw=0.8, label='16th percentile')
+    #ax.plot(wave_spec_rs, upper_scaled, color='blue', lw=0.8, label='84th percentile')
+    #########       PLOT THE BEST FIT      #########
+    
+    ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
+    
+    #########    PLOT MODEL PHOTOMETRY     #########
+    
+    ax.plot(phot_wave_microns, phot_scaled, 'd', markersize=6, color='black', label='Model photometry')
+    ax.errorbar(phot_wave_miri_microns, phot_miri_scaled, yerr=phot_miri_err_scaled, fmt='d', markersize=6, color='black')
+    #ax.plot(phot_wave_miri_microns, phot_miri_scaled, 'd', markersize=6, color='black')
+    
+    #########  PLOT MEASURED PHOTOMETRY    #########
+
+    obs_phot = plot_photometry(ax, obs)
     
     # Compute bounds
-    wave_mask = (wave_spec >= 0.4) & (wave_spec <= 35)
-    # Apply mask to spectrum(s)
-    spec_within = spec[wave_mask]  # works for 1D or 2D (e.g. percentiles)
-    spec_within = [ele for ele in spec_within if ele > 0]
+    wave_mask = (wave_spec_rs >= 0.4) & (wave_spec_rs <= 35)
     
+    # Apply mask to spectrum(s)
+    spec_within = spec_scaled[wave_mask]  # works for 1D or 2D (e.g. percentiles)
+    spec_within = [ele for ele in spec_within if ele > 0]
+
     # Compute y-axis limits
     ymin = np.nanmin(spec_within)
-    ymax = np.nanmax(spec_within)
+    ymax_spec = np.nanmax(spec_within)
+    ymax_phot = np.nanmax(obs_phot)
+    
+    ymax = np.maximum(ymax_spec, ymax_phot)
     
     # Add margin proportionally, protecting against log-scale issues
     ymin_plot = ymin * 0.2  # reduce, but stay > 0
@@ -447,331 +182,246 @@ def load_and_display(objid, duste=False, mod=None, mod_err=None, outfile=None):
 
     # Set limits
     ax.set_ylim(ymin_plot, ymax_plot)
-    
+
     # Plot formatting
-    ax.set_xlabel('Observed Wavelength (µm)', fontsize=13)
-    ax.set_ylabel('Flux (µJy)', fontsize=13)
-    ax.set_xlim(0.4, 35)    
+    ax.set_xlabel('Observed Wavelength [µm]', fontsize=15)
+    ax.set_ylabel('Flux [µJy]', fontsize=15)
+    ax.set_xlim(0.4, 35)#200)    # Change x range    
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.tick_params(axis='both', which='major', labelsize=13)
-    ax.legend()
     
+    if gid in [7549, 7696, 8013, 9395, 10339, 10400, 11142, 11247, 11494, 12133, 12175, 12332, 21472, 21477]:
+        ax.legend(loc="lower right", fontsize=12)
+        ax.text(0.03, 0.95, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    else:
+        ax.legend(loc="upper left", fontsize=12)
+        ax.text(0.86, 0.09, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    #ax.set_title(f"Galaxy {objid} at z={np.round(zred,2)}", fontsize=14)
+
+    ax.tick_params(axis='both', which='major', labelsize=15)
+    
+    #zred_rounded = np.round(zred,2)
+    #plt.title(f"z = {zred_rounded}")
     plt.tight_layout()
-    if outfile:
-        plt.savefig(outfile)
-        print(f"✅ Plot saved to {outfile}")
+    
+    if plot_dir:
+        os.makedirs(plot_dir, exist_ok=True)
+        fname = os.path.join(plot_dir, f'{gid}.png')
+        plt.savefig(fname)
+        print(f"Plot saved to {fname}")
     plt.show()
+    plt.close()
     
+    return
+
+
+def plot_miri_fit(filename, plot_dir=None):
     
-def create_hist(csv_path, out_dir, bins=25):
-    """
-    Create a histogram of the N_sigma values for all galaxies and for all bands as stored in the csv file.
-    """
-    try:
-        df = pd.read_csv(csv_path)
+    try:    # try to open
+        with open(filename, 'rb') as f:
+            fit_data = pkl.load(f)
     except FileNotFoundError:
-        print(f"File {csv_path} not found. Please check the file path.")
-        return
-    
-    print(f"Loaded {len(df)} rows from {csv_path}")
-    
-    
-    # Create output folder
-    os.makedirs(out_dir, exist_ok=True)
+        print(f"⚠️ Attention: File {filename} not found. Skipping...")
+        return 
 
-    # Compute global x-axis limits (clip outliers if needed)
-    #x_min, x_max = np.percentile(df['N_sigma'], [1, 99])  
+    gid = fit_data['id']
+    zred = fit_data['zred']
     
+    model = fit_data['model']
+    spec_best = model['spec_best']
+    spec_16th = model['spec_16th']
+    spec_median = model['spec_median']
+    spec_84th = model['spec_84th']
+    wave_spec = model['wave_spec']
+    sample_specs = model['sample_specs']
+    phot = model['phot']
+    phot_wave = model['phot_wave']
+    
+    obs = fit_data['obs']
+    maggies_to_muJy = fit_data['maggies_to_muJy']
+    
+    # Convert to µJy
+    lower_scaled = spec_16th * maggies_to_muJy    
+    median_scaled = spec_median * maggies_to_muJy
+    upper_scaled = spec_84th * maggies_to_muJy
+    spec_scaled = spec_best * maggies_to_muJy
+    
+    phot_wave_microns = phot_wave * 1e-4  # convert to µm
+    
+    phot_scaled = phot * maggies_to_muJy
+    
+    wave_spec_rs = wave_spec * 1e-4 * (1+zred)
+    
+    # Initialise the plot
+    fig, ax = plt.subplots(figsize=(8, 5))
+    
+    # Plot shaded region for 1σ uncertainty
+    ax.fill_between(wave_spec_rs, lower_scaled, upper_scaled, color='crimson', alpha=0.2, label='1σ uncertainty')
+    
+    for spec in sample_specs:
+        ax.plot(wave_spec_rs, spec*maggies_to_muJy, color='crimson', alpha=0.15, lw=0.8)
+    
+    #ax.plot(wave_spec_rs, lower_scaled, color='blue', lw=0.8, label='16th percentile')
+    #ax.plot(wave_spec_rs, upper_scaled, color='blue', lw=0.8, label='84th percentile')
+    #########       PLOT THE BEST FIT      #########
+    
+    ax.plot(wave_spec_rs, spec_scaled, '-', color='crimson', alpha=0.8, lw=1.5, label='Best-fit model')
+    
+    #########    PLOT MODEL PHOTOMETRY     #########
+    # Identify which filters have actual valid observations in obs
+    obs_maggies = np.array(obs['maggies'])
+    obs_unc = np.array(obs['maggies_unc'])
+    
+    # Valid observations must be finite numbers with positive uncertainty
+    valid_obs_mask = np.isfinite(obs_maggies) & np.isfinite(obs_unc) & (obs_unc > 0)
+    
+    # Plot model photometry ONLY where valid observations exist
+    ax.plot(
+        phot_wave_microns[valid_obs_mask], 
+        phot_scaled[valid_obs_mask], 
+        'd', 
+        markersize=6, 
+        color='black', 
+        label='Model photometry'
+    )
+    
+    #########  PLOT MEASURED PHOTOMETRY    #########
 
-    filters = df['filter_name'].unique()
-
-    # Example: sort filters by central wavelength
-    # (replace this mapping with your actual filters & λ)
-    filter_wavelengths = {
-        'jwst_f770w': 7.7,
-        'jwst_f1000w': 10.0,
-        'jwst_f1800w': 18.0,
-        'jwst_f2100w': 21.0,
+    # Define the style per instrument
+    instrument_styles = {
+        'acs':     {'color': 'royalblue',   'marker': 'o', 'edgecolor': 'black', 'label': 'HST/ACS', 'ms': 10},
+        'wfc3':    {'color': 'limegreen',  'marker': 'o', 'edgecolor': 'black', 'label': 'HST/WFC3', 'ms': 10},
+        'nircam':  {'color': 'orange', 'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST/NIRCam', 'ms': 10},
+        'miri':    {'color': 'firebrick',    'marker': 'p', 'edgecolor': 'black',    'alpha': 0.7, 'label': 'JWST/MIRI', 'ms': 10}
     }
-
-    bands = ['F770W', 'F1000W', 'F1800W', 'F2100W']
-    colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']  # Distinct colors per band
-
-    # Sort filter names by wavelength
-    filters_sorted = sorted(filters,
-                            key=lambda f: filter_wavelengths.get(f, np.inf))
-
-    unreliable = [12513, 18977]
-
-    # Make a 2x2 grid
-    fig, axes = plt.subplots(2, 2, figsize=(10, 9), sharex=False, sharey=True)
-    axes = axes.flatten()  # easier to index
-
-    for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
-        subset = df[df['filter_name'] == f]
-        
-        for un in unreliable:
-            subset = subset[subset['galaxy_id'] != un]
-        
-        ax.set_title(f'{bands[i]}')
-        #ax.set_xlim(x_min, x_max)
-        ax.set_xlabel(r'$N_\sigma$')
-        ax.set_ylabel('Number of galaxies')
-        
-        #if i in [0,1]: ax.set_ylim(0, 24)
-        #elif i in [2,3]: ax.set_ylim(0,12)
-
-        nsigmas = subset['N_sigma']
-        # Add compact statistics
-        mean_ratio = np.mean(nsigmas)
-        std_ratio = np.std(nsigmas)
-        N = len(subset['galaxy_id'].unique())
-        num = f'N = {N}'
-        
-        x_min = -8.5
-        x_max = 8.5
-        bins = np.linspace(x_min, x_max, 25)
-        
-        counts, bin_edges, _ = ax.hist(nsigmas, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
-
-        x = np.linspace(x_min, x_max, 500)
-        gaussian_norm = norm.pdf(x, loc=0, scale=1)
-        gaussian_obs = norm.pdf(x, loc=mean_ratio, scale=std_ratio)
-
-        # Scale Gaussians to match histogram counts
-        gaussian_norm_scaled = gaussian_norm * len(nsigmas) * (bin_edges[1] - bin_edges[0])
-        gaussian_obs_scaled = gaussian_obs * len(nsigmas) * (bin_edges[1] - bin_edges[0])
-        
-        ax.plot(x, gaussian_norm_scaled, 'gray', lw=2, alpha=1, label=r'$\mathcal{N}(0,1)$')
-        ax.plot(x, gaussian_obs_scaled, colors[i], lw=2, alpha=1, label=r'$\mathcal{N}'+f'({mean_ratio:.2f},{std_ratio:.2f})$')
-        
-        median_ratio = np.median(nsigmas)
-        
-        stats_text = f'μ={mean_ratio:.2f}\nσ={std_ratio:.2f}\nMed={median_ratio:.2f}\n\n{num}'
-        ax.legend()
-        ax.text(0.8, 0.75, stats_text, transform=ax.transAxes, fontsize=10,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-        
-        # Annotate in the top-right corner (adjust x,y if needed)
-        #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
-        #        transform=ax.transAxes, ha='right', va='top',
-        #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-        
-    #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # Save single combined figure
-    filename = os.path.join(out_dir, 'Nsigma_all_filters_gauss_v4.png')
-    plt.savefig(filename, dpi=300)
-    plt.show()
+    
+    # Get current labels to prevent duplicates
+    _, labels = ax.get_legend_handles_labels()
     
     
-    # Make a 2x2 grid
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=False, sharey=False)
-    axes = axes.flatten()  # easier to index
-
-    for i, ax, f in zip((0,1,2,3), axes, filters_sorted):
-        subset = df[df['filter_name'] == f]
-        
-        # Exclude non-detections from the plots    
-        non_detections = {
-            'F770W': [11137, 17793, 8843, 12175, 7696, 7185, 8465, 19098, 12443, 12202, 21547, 9517, 9901, 10415, 12213, 
-                    21451, 11853, 11086, 22606, 18769, 9809, 11481, 21472, 19681, 12513, 21218, 12133, 16615, 10600, 11247, 
-                    20720, 17534, 11723], # Added 11723 since the fit is weird 
-            'F1000W': [17984, 12513, 12164, 12133, 11716, 16615, 16424, 12202, 11723, 11853, 13297, 18327, 12443, 17534], 
-            'F1800W': [12164, 11716, 10565, 10054, 11723, 12175, 19024, 8465, 8338, 18769, 7102, 10400, 12513, 19681, 7904, 
-                    10339, 12133, 10600, 9517, 10415, 11247, 12213, 11451, 7934, 18977], # Added 18977 since the fit is weird 
-            'F2100W': [17984, 12164, 11716, 16516, 11723, 11853, 12175, 16474, 12443, 12513, 12133, 16615, 16424, 12202, 
-                    12332, 17517, 12014, 11247, 13297, 12213, 17916, 17534]
-            }
-        
-        for nd in non_detections[bands[i]]:
-            subset = subset[subset['galaxy_id'] != nd]
-        
-        ax.set_title(f'{bands[i]}')
-        #ax.set_xlim(x_min, x_max)
-        ax.set_xlabel('Fractional difference')
-        ax.set_ylabel('Number of galaxies')
-        
-        #if i in [0,1]: ax.set_ylim(0, 24)
-        #elif i in [2,3]: ax.set_ylim(0,12)
-
-        frac_diffs = subset['perc_diff']
-        
-        for val in frac_diffs:
-            if np.abs(val) > 5.0:
-                print(f"⚠️ Warning: Found extreme fractional difference {val:.2f} in filter {f} for galaxy ID {subset[subset['perc_diff'] == val]['galaxy_id'].values[0]}")
-        
-        # Add compact statistics
-        mean_frac_diff = np.mean(frac_diffs)
-        std_frac_diff = np.std(frac_diffs)
-        N = len(subset['galaxy_id'].unique())
-        num = f'N = {N}'
-        
-        x_min = -6
-        x_max = 2
-        bins = np.linspace(x_min, x_max, 25)
-        
-        ax.hist(frac_diffs, bins=bins, color=colors[i], alpha=0.7, edgecolor='black')
-
-        median_frac_diff = np.median(frac_diffs)
-        
-        stats_text = f'μ={mean_frac_diff:.2f}\nσ={std_frac_diff:.2f}\nMed={median_frac_diff:.2f}\n\n{num}'
-        ax.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
-        #ax.set_ylim(0, 24)
-        # Annotate in the top-right corner (adjust x,y if needed)
-        #ax.text(0.95, 0.95, f'N = {n_galaxies}', 
-        #        transform=ax.transAxes, ha='right', va='top',
-        #        fontsize=10, bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-        
-    #plt.suptitle(r'$N_\sigma$ distribution for each MIRI filter', fontsize=14)
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    # Save single combined figure
-    filename = os.path.join(out_dir, 'frac_diffs_all_filters_v3.png')
-    plt.savefig(filename, dpi=300)
-    plt.show()
-    """
-    # Plot histograms for galaxies    
-    galaxies = df['galaxy_id'].unique()
-
-    #x_min, x_max = df['N_sigma'].min(), df['N_sigma'].max()
+    obs_phot = []
     
-    x_min = -10
-    x_max = 10
-    
-    for gal in galaxies:
-        subset = df[df['galaxy_id'] == gal]
+    for i, filt in enumerate(obs['filters']):
         
-        plt.figure(figsize=(5, 4))
-        plt.hist(subset['N_sigma'], bins=25, color='skyblue', alpha=0.7, range=(x_min, x_max), edgecolor='black')
-        plt.xlim(0, x_max)        
-        #plt.title(r'$N_\sigma$ Distribution - ' + f'{gal}')
-        plt.xlabel(r'$N_\sigma$')    
-        plt.ylabel('Number of bands')
-        plt.tight_layout()
+        wave = obs['phot_wave'][i] * 1e-4  # convert to µm
+        flux = obs['maggies'][i] * maggies_to_muJy  # µJy
+        err  = obs['maggies_unc'][i] * maggies_to_muJy  # µJy
         
-        os.makedirs(out_dir, exist_ok=True)
-        filename = os.path.join(out_dir, f'{gal}_Nsigma_abs.png')
-        #plt.savefig(filename, dpi=300)
-        plt.close()
-        print(f"✅ Saved histogram for galaxy {gal} to {filename}")
+        name = filt.name.lower()     
 
-    """
-    # Compute reduced chi^2 per galaxy
-    reduced_chi2 = []
-
-    for gal in df['galaxy_id'].unique():
-        subset = df[df['galaxy_id'] == gal]
+        # Improved Upper Limit Logic for MIRI
+        uplims = False
         
-        for un in unreliable:
-            subset = subset[subset['galaxy_id'] != un]
+        if (flux / err < 3.0):
+            uplims = True
+            flux = 3 * err # Plot at 3-sigma
+            err = flux * 0.4 # Small arrow size for visualisation
         
-        n_filters = len(subset)
-        if n_filters > 0:
-            chi2 = np.sum(subset['N_sigma']**2) / n_filters           
-            reduced_chi2.append({'galaxy_id': gal, 'reduced_chi2': chi2})
+        if 'acs_wfc' in name:
+            style = instrument_styles['acs']
+        elif 'wfc3_ir' in name:
+            style = instrument_styles['wfc3']
+        elif 'miri' in name or any(m in name for m in ['f770w', 'f1000w', 'f1800w', 'f2100w']):
+            style = instrument_styles['miri']            
+        elif 'nircam' in name or ('jwst' in name and 'f' in name and 'w' in name):
+            style = instrument_styles['nircam']
+        else:
+            continue  # skip unknown filters
+        
+        """
+        if name == "jwst_f770w":
+            cs_flux = 2.0627863629430663
+            cs_err = 0.11323451897914114
+            
+            ax.errorbar(    # Plot COSMOS-Webb data
+                wave, cs_flux, yerr=cs_err,
+                fmt='p',
+                color='dodgerblue',
+                markeredgecolor=style.get('edgecolor', 'none'),
+                alpha=style.get('alpha', 1.0),
+                markersize=10,
+                uplims=uplims, # This creates the actual downward arrow
+                label='COSMOS2025'
+            )
+        """
 
-    chi2_df = pd.DataFrame(reduced_chi2)
+        ax.errorbar(
+            wave, flux, yerr=err,
+            fmt=style['marker'],
+            color=style['color'],
+            markeredgecolor=style.get('edgecolor', 'none'),
+            alpha=style.get('alpha', 1.0),
+            markersize=10,
+            uplims=uplims, # This creates the actual downward arrow
+            label=style['label'] if style['label'] not in labels else None
+        )
+        
+        # Update labels list to prevent duplicates in current loop
+        if style['label'] not in labels:
+            labels.append(style['label'])
+        
+        obs_phot.append(flux)
+            
+    
+    # Compute bounds
+    wave_mask = (wave_spec_rs >= 0.4) & (wave_spec_rs <= 35)
+    
+    # Apply mask to spectrum(s)
+    spec_within = spec_scaled[wave_mask]  # works for 1D or 2D (e.g. percentiles)
+    spec_within = [ele for ele in spec_within if ele > 0]
 
-    # Plot histogram of reduced chi^2
-    plt.figure(figsize=(6,4))
-    plt.hist(chi2_df['reduced_chi2'], bins=25, color='salmon', alpha=0.7, edgecolor='black', range=(0, chi2_df['reduced_chi2'].quantile(0.95)))
-    plt.xlabel(r'Reduced $\chi^2$')
-    plt.ylabel('Number of galaxies')
-    #plt.title(r'Reduced $\chi^2$ distribution')
+    # Compute y-axis limits
+    ymin = np.nanmin(spec_within)
+    ymax_spec = np.nanmax(spec_within)
+    ymax_phot = np.nanmax(obs_phot)
     
-    # Count how many chi2 values are in the histogram
-    chi2_values = len(chi2_df)
-    num = f'N = {chi2_values}'
-    # Annotate in the top-right corner (adjust x,y if needed)
+    ymax = np.maximum(ymax_spec, ymax_phot)
     
-    mean_chi2 = np.mean(chi2_df['reduced_chi2'])
-    std_chi2 = np.std(chi2_df['reduced_chi2'])
-    median_chi2 = np.median(chi2_df['reduced_chi2'])
     
-    stats_text = f'μ={mean_chi2:.2f}\nσ={std_chi2:.2f}\nMed={median_chi2:.2f}\n\n{num}'
+    # Add margin proportionally, protecting against log-scale issues
+    ymin_plot = ymin * 0.2  # reduce, but stay > 0
+    ymax_plot = ymax * 5   # increase
+
+    # Set limits
+    ax.set_ylim(ymin_plot, ymax_plot)
+
+    # Plot formatting
+    ax.set_xlabel('Observed Wavelength [µm]', fontsize=15)
+    ax.set_ylabel('Flux [µJy]', fontsize=15)
+    ax.set_xlim(0.4, 35)#200)    # Change x range    
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.legend(loc="upper left")
+    #ax.set_title(f"Galaxy {objid} at z={np.round(zred,2)}", fontsize=14)
+
+    ax.tick_params(axis='both', which='major', labelsize=15)
     
-    plt.text(0.8, 0.71, stats_text, transform=ax.transAxes, fontsize=10,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+    if gid in [7549, 7696, 8013, 9395, 10339, 10400, 11142, 11247, 11494, 12133, 12175, 12332, 21472, 21477]:
+        ax.legend(loc="lower right", fontsize=12)
+        ax.text(0.03, 0.95, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    else:
+        ax.legend(loc="upper left", fontsize=12)
+        ax.text(0.86, 0.09, f"z = {np.round(zred,2)}", transform=ax.transAxes, fontsize=14,
+                            verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
     
-    # plot vertical lines for mean and median
-    plt.vlines(mean_chi2, ymin=0, ymax=20, color='red', alpha=0.8, linestyle='--', label='Mean')
-    plt.vlines(median_chi2, ymin=0, ymax=15, color='darkred', alpha=0.8, linestyle='--', label='Median')
-    plt.legend()
-    
+    zred_rounded = np.round(zred,2)
+    #plt.title(f"Galaxy {objid} at z={zred_rounded}")
     plt.tight_layout()
-    filename = os.path.join(out_dir, 'reduced_chi2.png')
-    plt.savefig(filename, dpi=300)
-    plt.show()
-    """
-    chi2_df['n_filters'] = chi2_df['galaxy_id'].apply(
-    lambda g: len(df[df['galaxy_id'] == g])
-    )
-
-    # Compute 95th percentile of reduced chi^2
-    q95 = chi2_df['reduced_chi2'].quantile(0.95)
-
-    # Filter out galaxies above this threshold
-    filtered = chi2_df[chi2_df['reduced_chi2'] <= q95]
-
-    # Scatter plot with filtered data
-    plt.scatter(filtered['n_filters'], filtered['reduced_chi2'], alpha=0.7)    
-    plt.xlabel('Number of photometric data points')
-    plt.ylabel(r'Reduced $\chi^2$')
-    #plt.title(r'Reduced $\chi^2$ vs. number of MIRI bands')
-    plt.axhline(1, color='red', linestyle='--')
-    filename = os.path.join(out_dir, 'reduced_chi2_vs_npoints_notitle.png')
-    plt.savefig(filename, dpi=300)
-    plt.show()
-
-    # Compute average fractional discrepancy per galaxy
-    frac_disc = (
-        df.groupby('galaxy_id')['perc_diff']
-        .mean()
-        .reset_index()
-        .rename(columns={'perc_diff': 'mean_frac_diff'})
-    )
-
-    # Merge with chi2_df
-    chi2_df = chi2_df.merge(frac_disc, on='galaxy_id', how='left')
-
-    # Plot histogram of the mean fractional difference
-    plt.figure(figsize=(6,4))
-    plt.hist(chi2_df['mean_frac_diff'], bins=25, color='palegreen', alpha=0.7, edgecolor='black', range=(0, chi2_df['mean_frac_diff'].quantile(0.9)))
-    plt.xlabel('Mean fractional difference per galaxy')
-    plt.ylabel('Number of galaxies')
-    #plt.title('Mean fractional difference per galaxy')
     
-    # Annotate in the top-right corner (adjust x,y if needed)
-    plt.text(0.95, 0.95, f'N = {chi2_values}',
-        transform=plt.gca().transAxes,  # coordinates relative to the axes (0–1)
-        ha='right', va='top',
-        fontsize=10,
-        bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-    plt.tight_layout()
-    filename = os.path.join(out_dir, 'mean_frac_diff_hist_notitle.png')
-    plt.savefig(filename, dpi=300)
+    if plot_dir:
+        os.makedirs(plot_dir, exist_ok=True)
+        fname = os.path.join(plot_dir, f'{gid}.png')
+        plt.savefig(fname)
+        print(f"Plot saved to {fname}")
     plt.show()
-
-    # Move n_filters to the last column explicitly
-    cols = [c for c in chi2_df.columns if c != 'n_filters'] + ['n_filters']
-    chi2_df = chi2_df[cols]
+    plt.close()
     
-    # Sort by reduced_chi2 (ascending = best fit first)
-    chi2_df_sorted = chi2_df.sort_values('reduced_chi2', ascending=True).reset_index(drop=True)
-
-    # Save to CSV
-    analysis_dir = "/Users/benjamincollins/University/Master/Red_Cardinal/prospector/analysis/"
-    filename = os.path.join(analysis_dir, 'fit_quality.csv')
-    chi2_df_sorted.to_csv(filename, index=False)
-
-    print(f"Saved ranked fit quality table to {filename}")
-    print(chi2_df_sorted.head(10))  # quick preview
-    """
+    return
 
 
-"""
 def setup_publication_style():
     # Set up matplotlib for publication-quality plots
     plt.rcParams.update({
@@ -793,7 +443,7 @@ def setup_publication_style():
         'savefig.dpi': 300,
         'savefig.bbox': 'tight'
     })
-"""
+
 
 
 def get_color_scheme(scheme_name='viridis'):
@@ -807,390 +457,251 @@ def get_color_scheme(scheme_name='viridis'):
     }
     return schemes.get(scheme_name, schemes['viridis'])
 
-def plot_main_sequence(masses, sfr100, zred_ms, detections, data=None, ms_type='Speagle', color_scheme='viridis', gradient='absolute', save_path='main_sequence.png'):
+
+
+def plot_sample_from_pickles(pickle_dir, out_dir='/Users/benjamincollins/University/Master/Red_Cardinal/prospector/sample_plots/'):
     """
-    Plot the star-forming main sequence
-    
-    Parameters:
-    -----------
-    masses : array-like
-        Stellar masses in solar masses
-    sfr100 : array-like
-        Star formation rates (100 Myr)
-    zred_ms : float
-        Median redshift of the sample
-    detections : dict
-        Dict of filters and detections per galaxy
-    data : dict, optional
-        Dict of filters and data to colourise by
-    color_scheme : str, optional
-        Color scheme to use
-    gradient : str, optional
-        Choose what to colour by
-    save_path : str
-        Path to save the plot
+    Plot z-M parameter space colour-coded by nsigma.
     """
     
-    # Example galaxy data arrays
-    logM = np.log10(masses)          # masses in solar masses
-
-    # Mass grid in log10(M)
-    logM_grid = np.linspace(np.min(logM)-0.1, np.max(logM)+0.1, 200)
-
-    logSFR_sample = np.log10(sfr100) # SFR in solar masses per year
-
-    # Median redshift for MS line
-    t = cosmo.age(zred_ms).to(u.Gyr).value  # cosmic time in Gyr
-
-    if ms_type == 'Leja':        
-        
-        a = -0.06707 + 0.3684 * zred_ms - 0.1047 * zred_ms**2
-        b = 0.8552 - 0.1010 * zred_ms - 0.001816 * zred_ms*2
-        c = 0.2148 + 0.8137 * zred_ms - 0.08052 * zred_ms**2
-        log_Mt = 10.29 - 0.1284 * zred_ms + 0.1203 * zred_ms**2
-        
-        logSFR_MS = np.zeros_like(logM_grid)
-        
-        for i, logM_i in enumerate(logM_grid):
-            if logM_i > log_Mt:
-                logSFR_MS[i] = a * (logM_i - log_Mt) + c
-            else:
-                logSFR_MS[i] = b * (logM_i - log_Mt) + c        
-        
-    elif ms_type == 'Speagle':
-        # Speagle+14 coefficients
-        slope = 0.84 - 0.026 * t
-        intercept = -(6.51 - 0.11 * t)
-
-        # 1-sigma errors
-        slope_err = 0.02 + 0.003 * t
-        intercept_err = 0.24 + 0.03 * t
-
-        # Main sequence
-        logSFR_MS = slope * logM_grid + intercept
-        logSFR_high = (slope + slope_err) * logM_grid + (intercept + intercept_err)
-        logSFR_low  = (slope - slope_err) * logM_grid + (intercept - intercept_err)
+    pickle_files = glob.glob(f'{pickle_dir}/*.pkl')
     
-    # Now let's introduce the plot   
+    # Color schemes based on band
+    cmaps = {'F770W': 'Blues', 'F1000W': 'Greens', 'F1800W': 'Oranges', 'F2100W': 'Reds'}
     
-    if gradient == 'absolute':
-        fig, ax = plt.subplots(figsize=(10, 5))
-        cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
-        bounds = np.arange(-0.5, 5.5, 1)
-        norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
-        N_detected = []
-        for det in detections: 
-            N_detected.append(sum(det.values()))
-        N_detected = np.array(N_detected)
-        
-        # Scatter plot
-        sc = plt.scatter(logM, logSFR_sample, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8, edgecolor='black')
-        
-        # Colorbar
-        cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
-        cbar.set_label('Number of MIRI detections')
-        cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
-        save_path += f'sfms_{gradient}'
-        
-    elif gradient == 'relative':  
-        fig, ax = plt.subplots(figsize=(10, 5))
-        cmap = plt.get_cmap(color_scheme)
-        N_detected = []
-        N_available = []
-        for det in detections: 
-            N_detected.append(sum(det.values()))
-            N_available.append(len(det.values()))
-        N_detected = np.array(N_detected)
-        N_available = np.array(N_available)
-        f_det = N_detected / N_available  # fraction 0-1  
-        
-        # Scatter plot
-        sc = ax.scatter(logM, logSFR_sample, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
-        
-        # Colorbar
-        cbar = plt.colorbar(sc, ax=ax)
-        cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
-        cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
-        cbar.set_label('Relative number of MIRI detections')
-        save_path += f'sfms_{gradient}'
+    # Lists to store extracted data
+    logmasses = []
+    zreds = []
+    ids = []
+    fit_qual = []
     
-    elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
+    # 1. Extraction Loop
+    for f_path in pickle_files:
+        with open(f_path, 'rb') as f:
+            data = pkl.load(f)
+        
+        if data['id'] in no_spec:
+            continue
+        
+        props = data['galaxy_properties']
+        ids.append(data['id'])
+        logmasses.append(props['logmass'])
+        zreds.append(data['zred'])
+        fit_qual.append(data['fit_quality'])
+    
+    # Convert to numpy arrays for masking
+    zreds = np.array(zreds)
+    logmasses = np.array(logmasses)
+    
+    os.makedirs(out_dir, exist_ok=True)        
+    
+    for band in cmaps.keys():
         fig, ax = plt.subplots(figsize=(6, 4))
+        
         flux_array = []
         mask = []
-        band = gradient.upper()
         
-        for det_dict, flux_dict in zip(detections, data):
-            if det_dict.get(band, False) and band in flux_dict:
-                flux_array.append(flux_dict[band])
-                mask.append(True)
+        for fq in fit_qual:
+            if band in fq:
+                snr = fq[band]['snr']                
+                if snr > 3.0:
+                    # We use obs_flux from your new fit_quality dict
+                    flux_array.append(fq[band]['obs_flux'])
+                    mask.append(True)
+                else:
+                    mask.append(False)
             else:
-                flux_array.append(np.nan)
                 mask.append(False)
-        
+                
         mask = np.array(mask)
+              
+        # Apply mask to all plotting arrays
+        plot_z = zreds[mask]
+        plot_m = logmasses[mask]
+        # Convert flux to log10(muJy) - assuming it's already muJy from your pickle loop
+        plot_color = np.log10(np.array(flux_array)*1e6)
         
-        # Apply mask to all quantities
-        flux_array = np.array(flux_array)[mask]*1e6
-        logM = np.array(logM)[mask]
-        logSFR_sample = np.array(logSFR_sample)[mask]
+        color_scheme = cmaps.get(band, 'viridis')
         
-        # Convert flux to log scale
-        log_flux_array = np.log10(flux_array)
-
-        if gradient == 'f770w': color_scheme = "Blues"
-        elif gradient == 'f1000w': color_scheme = "Greens"
-        elif gradient == 'f1800w': color_scheme = "Oranges"
-        elif gradient == 'f2100w': color_scheme = "Reds"
-
-        # Create scatter plot coloured by log flux
-        sc = ax.scatter(logM, logSFR_sample, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
-        
+        sc = ax.scatter(plot_z, plot_m, c=plot_color, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
         cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
-        #ax.set_xlim(8, 13)
-        ax.set_ylim(-1, 4)
-        save_path += f'sfms_{gradient}'
+        cbar.set_label(rf'$\log_{{10}}(Flux) [\mu Jy]$', fontsize=14)
         
-    elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        nsig_array = []
-        mask = []
-        band = gradient.split('_')[1].upper()
+        filename = f'zM_flux_{band}.png'
         
-        color_scheme = "gnuplot2"
+        stats_text = f'N = {len(plot_z)}'
+        ax.text(0.83, 0.92, stats_text, transform=ax.transAxes, fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
         
-        for det_dict, nsig_dict in zip(detections, data):
-            if det_dict.get(band, False) and band in nsig_dict:
-                nsig_array.append(nsig_dict[band])
-                mask.append(True)
-            else:
-                nsig_array.append(np.nan)
-                mask.append(False)
+        save_path = os.path.join(out_dir, filename)
+        ax.set_title(f'{band}', fontsize=14)
+        ax.set_xlim(1.25, 3.75)
+        ax.set_ylim(8.5, 12.5)
         
-        mask = np.array(mask)
-
-        # Apply mask to all quantities
-        nsig_array = np.array(nsig_array)[mask]
-        logM = np.array(logM)[mask]
-        logSFR_sample = np.array(logSFR_sample)[mask]
-        
-        # Create scatter plot coloured by log flux
-        sc = ax.scatter(logM, logSFR_sample, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7, edgecolor='black')
-        
-        cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf'$N_\sigma$ ({band})')
-        ax.set_ylim(-1, 4)
-        save_path += f'sfms_{gradient}'
-        
-    else:
-        print("⚠️Gradient has to be set to either absolute or relative.")
-        return None
-
-    if ms_type == 'Leja':
-        # MS line
-        ax.plot(logM_grid, logSFR_MS, 'k--', color='blue', alpha=0.7, label=f'Leja+22 MS (z={zred_ms:.2f})', linewidth=2)
-        ax.plot(logM_grid, logSFR_MS - 1.0, 'k:', color='blue', alpha=0.7, label='1 dex below MS')
-        save_path += f'_Leja.png'
-    elif ms_type == 'Speagle':
-        # MS line and shaded 1-sigma region
-        ax.plot(logM_grid, logSFR_MS, 'k--', alpha=0.5, label=f'Speagle+14 MS (z={zred_ms:.2f})')
-        ax.fill_between(logM_grid, logSFR_low, logSFR_high, color='gray', alpha=0.15, label='1σ uncertainty')
-        save_path += f'_Speagle.png'
-
-    # Labels and legend
-    ax.set_xlabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
-    ax.set_ylabel(r'$\log_{10}(\mathrm{SFR} / $M$_\odot\,\mathrm{yr}^{-1})$', fontsize=14)
-    ax.legend(loc='lower right')
-    ax.grid(alpha=0.3)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Plot saved as {save_path}")
-
-def plot_mass_vs_redshift(zreds, logmasses, detections, data=None, color_scheme='plasma', gradient='absolute', save_path='z_mass_parameter_space.png'):
-    """
-    Plot z-M parameter space
-    
-    Parameters:
-    -----------
-    zreds : array-like
-        Redshift values
-    logmasses : array-like
-        Log stellar masses
-    detections : dict-like
-        Available filters with True/False
-    color_scheme : str
-        Color scheme to use
-    gradient : str
-        Specify whether to use absolute or relative detections for the colorbar
-    save_path : str
-        Path to save the plot
-    """
-    
-    if gradient == 'absolute':
-        fig, ax = plt.subplots(figsize=(10, 5))
-        cmap = plt.get_cmap(color_scheme, 5)  # 5 discrete colors: 0,1,2,3,4
-        bounds = np.arange(-0.5, 5.5, 1)
-        norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=5)
-        N_detected = []
-        for det in detections: 
-            N_detected.append(sum(det.values()))
-        N_detected = np.array(N_detected)
-        sc = plt.scatter(zreds, logmasses, c=N_detected, cmap=cmap, norm=norm, s=60, alpha=0.8, edgecolor='black')
-        
-        cbar = fig.colorbar(sc, ax=ax, ticks=np.arange(0, 5))   # ticks at 0,1,2,3,4
-        cbar.set_label('Number of MIRI detections')
-        cbar.ax.set_yticklabels([str(i) for i in range(5)])    # ensure labels 0..4
-        
-        detected = N_detected > 0
-        # Add sample statistics as text
-        ax.text(0.78, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
-        save_path = save_path + f'zM_{gradient}.png'
-        
-    elif gradient == 'relative': 
-        fig, ax = plt.subplots(figsize=(10, 5)) 
-        N_detected = []
-        N_available = []
-        for det in detections: 
-            N_detected.append(sum(det.values()))
-            N_available.append(len(det.values()))
-        N_detected = np.array(N_detected)
-        N_available = np.array(N_available)
-        f_det = N_detected / N_available  # fraction 0-1  
-        
-        cmap = plt.get_cmap(color_scheme)
-
-        sc = ax.scatter(zreds, logmasses, c=f_det, cmap=cmap, s=60, edgecolor='black', norm=Normalize(vmin=0, vmax=1))
-
-        cbar = plt.colorbar(sc, ax=ax)
-        cbar.set_ticks([0, 0.25, 0.5, 0.75, 1.0])
-        cbar.set_ticklabels(['0%', '25%', '50%', '75%', '100%'])
-        cbar.set_label('Relative number of MIRI detections')
-        
-        detected = N_detected > 0
-        # Add sample statistics as text
-        ax.text(0.78, 0.98, f'Total: {len(zreds)} galaxies\nDetected: {np.sum(detected)} ({100*np.sum(detected)/len(zreds):.1f}%)', 
-                transform=ax.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-
-        save_path = save_path + f'zM_{gradient}.png'
-        
-    elif gradient in ['f770w', 'f1000w', 'f1800w', 'f2100w']:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        flux_array = []
-        mask = []
-        band = gradient.upper()
-        
-        for det_dict, flux_dict in zip(detections, data):
-            if det_dict.get(band, False) and band in flux_dict:
-                flux_array.append(flux_dict[band])
-                mask.append(True)
-            else:
-                flux_array.append(np.nan)
-                mask.append(False)
-        
-        mask = np.array(mask)
-        
-        # Apply mask to all quantities
-        flux_array = np.array(flux_array)[mask]*1e6
-        zreds = np.array(zreds)[mask]
-        logmasses = np.array(logmasses)[mask]
-
-        # Convert flux to log scale
-        log_flux_array = np.log10(flux_array)
-
-        if gradient == 'f770w': color_scheme = "Blues"
-        elif gradient == 'f1000w': color_scheme = "Greens"
-        elif gradient == 'f1800w': color_scheme = "Oranges"
-        elif gradient == 'f2100w': color_scheme = "Reds"
-
-        # Create scatter plot coloured by log flux
-        sc = ax.scatter(zreds, logmasses, c=log_flux_array, cmap=color_scheme, s=60, alpha=0.8, edgecolor='black')
-        
-        cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf'$\log_{{10}}(F_{{\mathrm{{{gradient.upper()}}}}})\ [µJy]$')        #cbar.set_label("log$_{10}$(F770W flux) [μJy]")
-        save_path = save_path + f'zM_{gradient}.png'
-        ax.set_xlim(1.5, 3.75)
-        ax.set_ylim(9, 12)
-    
-    elif gradient in ['nsig_f770w', 'nsig_f1000w', 'nsig_f1800w', 'nsig_f2100w']:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        nsig_array = []
-        mask = []
-        band = gradient.split('_')[1].upper()
-        
-        for det_dict, nsig_dict in zip(detections, data):
-            if det_dict.get(band, False) and band in nsig_dict:
-                nsig_array.append(nsig_dict[band])
-                mask.append(True)
-            else:
-                nsig_array.append(np.nan)
-                mask.append(False)
-        
-        mask = np.array(mask)
-
-        # Apply mask to all quantities
-        nsig_array = np.array(nsig_array)[mask]
-        zreds = np.array(zreds)[mask]
-        logmasses = np.array(logmasses)[mask]
-        
-        # Create scatter plot coloured by log flux
-        sc = ax.scatter(zreds, logmasses, c=nsig_array, cmap=color_scheme, s=60, alpha=0.8, vmin=-7, vmax=7, edgecolor='black')
-        
-        cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf'$N_\sigma$ ({band})')
-        save_path = save_path + f'zM_{gradient}_r.png'
-        ax.set_xlim(1.5, 3.75)
-        ax.set_ylim(9, 12)
-        
-    
-    else:
-        print("⚠️Gradient has to be set to either absolute, relative or flux.")
-        return None
-          
-        
-    ax.set_xlabel('Redshift (z)', fontsize=14)
-    ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=14)
-    #ax.set_title('z-M Parameter Space', fontsize=16, fontweight='bold', pad=20)
-    ax.grid(True, alpha=0.3)
-        
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
-    print(f"Plot saved as {save_path}")
-
-
-def plot_nsigma_vs_params(nsig, band, log_ssfr, dust, save_path=None):
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # --- Left: Nsigma vs sSFR
-    sc1 = axes[0].scatter(log_ssfr, nsig, c=dust, cmap="viridis", alpha=0.7, edgecolor='black')
-    axes[0].axhline(0, ls="--", c="grey")
-    axes[0].set_xlabel(r'$\log(\mathrm{sSFR}_{100}\,[\mathrm{yr}^{-1}])$')
-    axes[0].set_ylabel(r'$N_\sigma$')
-    axes[0].set_title(f'{band}: ' + r'$\mathrm{N_\sigma}$ vs sSFR')
-    cb1 = fig.colorbar(sc1, ax=axes[0])
-    cb1.set_label("Dust attenuation (dust2)")
-    
-    # --- Right: Nsigma vs Dust
-    sc2 = axes[1].scatter(dust, nsig, c=log_ssfr, cmap="plasma", alpha=0.7, edgecolor='black')
-    axes[1].axhline(0, ls="--", c="grey")
-    axes[1].set_xlabel(r'Dust attenuation ($\mathrm{dust2}$)')
-    axes[1].set_ylabel(r'$N_\sigma$')
-    axes[1].set_title(f'{band}: ' + r'$\mathrm{N_\sigma}$ vs $\mathrm{A_V}$')
-    cb2 = fig.colorbar(sc2, ax=axes[1])
-    cb2.set_label(r'$\log(\mathrm{sSFR}_{100})$')
-    
-    plt.tight_layout()
-    if save_path:
+        ax.set_xlabel('Redshift (z)', fontsize=16)
+        ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=16)
+        ax.xaxis.set_tick_params(labelsize=16)
+        ax.yaxis.set_tick_params(labelsize=16)
+        ax.set_yticklabels(ax.get_yticks(), fontsize=12)
+        ax.grid(True, alpha=0.3)
+            
+        plt.tight_layout()
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.show()
+        plt.show()
+        print(f"Saved figure to {save_path}")
 
+        
+        
+    
+        fig, ax = plt.subplots(figsize=(6, 4))
+        nsig_array = []
+        mask = []
+        
+        for fq in fit_qual:
+            if band in fq:
+                nsig_array.append(fq[band]['n_sigma'])
+                mask.append(True)
+            else:
+                mask.append(False)
+                
+        mask = np.array(mask)
+        plot_z = zreds[mask]
+        plot_m = logmasses[mask]
+        plot_color = np.array(nsig_array)
+        
+        # Use a diverging colormap for residuals (Red-Blue)
+        sc = ax.scatter(plot_z, plot_m, c=plot_color, cmap='seismic', s=60, 
+                        alpha=0.8, edgecolor='black', vmin=-6, vmax=6)
+        cbar = fig.colorbar(sc, ax=ax)
+        cbar.set_label(rf'$N_\sigma$', fontsize=14)
+        
+        filename = f'zM_nsigma_{band}.png'
+            
+        stats_text = f'N = {len(plot_z)}'
+        ax.text(0.83, 0.92, stats_text, transform=ax.transAxes, fontsize=12,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+        
+        save_path = os.path.join(out_dir, filename)
+        ax.set_title(f'{band}', fontsize=14)
+        ax.set_xlim(1.25, 3.75)
+        ax.set_ylim(8.5, 12.5)
+        
+        ax.set_xlabel('Redshift (z)', fontsize=16)
+        ax.set_ylabel('log$_{10}$(M$_*$/M$_\\odot$)', fontsize=16)
+        ax.xaxis.set_tick_params(labelsize=12)
+        ax.yaxis.set_tick_params(labelsize=12)
+        ax.set_yticklabels(ax.get_yticks(), fontsize=12)
+        ax.grid(True, alpha=0.3)
+            
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        plt.show()
+        print(f"Saved figure to {save_path}")
+
+
+def plot_nsigma_vs_params(pickle_dir, out_dir='/Users/benjamincollins/University/Master/Red_Cardinal/prospector/sample_plots/'):
+    """
+    Plots N_sigma residuals against physical parameters (sSFR and Dust)
+    for MIRI filters F1800W and F2100W.
+    """
+    
+    pickle_files = glob.glob(f'{pickle_dir}/*.pkl')
+
+    # 1. Efficient Extraction
+    # We use a nested dict to keep everything organized by band
+    bands = ['F1800W', 'F2100W']
+    extracted = {b: {'nsig': [], 'ssfr': [], 'dust': []} for b in bands}
+
+    for f_path in pickle_files:
+        with open(f_path, 'rb') as f:
+            data = pkl.load(f)
+        
+        # Exclude quiescent galaxies of Bugiani et al. (2025)
+        if data['id'] in [7549, 8013, 8469, 9395, 10128, 10339, 10400, 10565, 10592, 11142, 11494, 16419, 18668, 21477]:
+            continue
+        
+        # Below -1 dex of the SFMS of Leja et al. (2022)
+        if data['id'] in [21472, 12133, 18977, 20720,  9809]:
+            continue
+        
+        fq = data.get('fit_quality', {})
+        props = data.get('galaxy_properties', {})
+        
+        # Pre-calculate common parameters to save CPU cycles
+        log_m = props.get('logmass', np.nan)
+        sfr = props.get('sfr_100myr', np.nan)
+        ssfr = np.log10(sfr / 10**log_m) if log_m and sfr else np.nan
+        dust_val = props.get('dust2', np.nan)
+
+        for b in bands:
+            if b in fq:
+                extracted[b]['nsig'].append(fq[b]['n_sigma'])
+                extracted[b]['ssfr'].append(ssfr)
+                extracted[b]['dust'].append(dust_val)
+
+    # 2. Setup Plotting
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes = axes.flatten()
+
+    # Define the configurations for each of the 4 subplots
+    # (Band, X-key, Color-key, cmap)
+    configs = [
+        ('F1800W', 'ssfr', 'dust', 'jet'),
+        ('F1800W', 'dust', 'ssfr', 'plasma'),
+        ('F2100W', 'ssfr', 'dust', 'jet'),
+        ('F2100W', 'dust', 'ssfr', 'plasma')
+    ]
+
+    for i, (band, x_key, c_key, cmap) in enumerate(configs):
+        ax = axes[i]
+        d = extracted[band]
+        
+        # Convert to numpy arrays for the specific band
+        x = np.array(d[x_key])
+        y = np.array(d['nsig'])
+        c = np.array(d[c_key])
+
+        # Remove any NaNs that might have sneaked in
+        mask = np.isfinite(x) & np.isfinite(y) & np.isfinite(c)
+        
+        sc = ax.scatter(x[mask], y[mask], c=c[mask], cmap=cmap, 
+                        alpha=0.7, edgecolor='black', s=55)
+
+        # Labels and Style
+        ax.axhline(0, ls="--", c="grey", alpha=0.5)
+        ax.set_title(f"{band}: $N_\sigma$ vs {x_key.upper()}", fontsize=14)
+        ax.set_ylabel(r"$N_\sigma$", fontsize=14)
+        ax.set_ylim(-6, 6)
+        ax.xaxis.set_tick_params(labelsize=12)
+        ax.yaxis.set_tick_params(labelsize=12)
+
+        # X-Axis specific formatting
+        if x_key == 'ssfr':
+            ax.set_xlabel(r"$\log(\mathrm{sSFR}_{100})$", fontsize=14)
+            ax.set_xlim(-11, -7.5)
+        else:
+            ax.set_xlabel(r"Dust Attenuation ($\mathrm{A_V}$)", fontsize=14)
+            ax.set_xlim(-0.1, 3.0)
+
+        # Colorbar
+        cb = fig.colorbar(sc, ax=ax)
+        cb.set_label(r"$\mathrm{A_V}$" if c_key == 'dust' else "sSFR", fontsize=14)
+        cb.ax.tick_params(labelsize=12)
+        
+        # Count label
+        ax.text(0.03, 0.92, f'N = {np.sum(mask)}', transform=ax.transAxes, 
+                fontsize=13, bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+
+    plt.tight_layout()
+    filename = os.path.join(out_dir, 'nsigma_vs_params_v2.png')
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    print(f"✅ Plot saved as {filename}")
+    plt.show()
+    
+    
+    
+
+    
 
 
 def plot_extremes(objid, base_paths, add_fit=False, save_path=None):
@@ -1213,6 +724,7 @@ def plot_extremes(objid, base_paths, add_fit=False, save_path=None):
     nircam_path = os.path.join(base_paths["nircam"], f"{objid}_F444W_cutout.fits")
     miri_paths = {
         band: os.path.join(base_paths["miri"], f"{objid}_{band}.h5")
+        #for band in ["F770W", "F1000W", "F1800W", "F2100W"]
         for band in ["F1800W", "F2100W"]
     }
     
@@ -1304,3 +816,4 @@ def show_png(path, ax, title):
     ax.imshow(img)
     #ax.set_title(title)
     ax.axis("off")
+    
