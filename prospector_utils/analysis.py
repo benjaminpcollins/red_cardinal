@@ -5,6 +5,8 @@ import pickle as pkl
 import pandas as pd
 import prospect.io.read_results as reader
 
+os.environ['SPS_HOME'] = '/Users/benjamincollins/Software/fsps'  # <-- update to actual fsps path
+
 from astropy.io import fits
 #from astropy.cosmology import WMAP9 as cosmo
 from prospect.models.transforms import logsfr_ratios_to_sfrs
@@ -44,14 +46,18 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
     n_samples : int, optional
         Number of posterior samples to draw for uncertainty estimation
     run : str, optional
-        Accepted run arguments are 'standard' or 'nirspec'
+        Accepted run arguments are 'standard' or 'nirspec' or 'nomiri'
     overwrite : bool, optional
         Whether to overwrite existing pickle files in stats_dir
     """
 
     print(f"Analysing fits of {len(galaxy_ids)} galaxies...\n")
-    
     os.makedirs(stats_dir, exist_ok=True)
+    
+    # Check whether MIRI data should be processed
+    has_miri = (phot_table is not None) and (run != 'nomiri')
+    if not has_miri:
+        print("ℹ️ Running in optical/NIR-only mode (No MIRI data).\n")
     
     for objid in galaxy_ids:
         
@@ -61,8 +67,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         
         if os.path.exists(filename) and not overwrite:
             print(f"Skipping galaxy {objid} - output file already exists!")
-            if plot_dir:
-                        plot_reconstructed_fit(filename, plot_dir)
+            if plot_dir and (run != 'nomiri'):
+                plot_reconstructed_fit(filename, plot_dir)
             continue
         
         elif os.path.exists(filename) and overwrite:
@@ -182,11 +188,18 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         phot_miri_samples = []
         lir_samples = []
         
-        # Extend the obs dictionary with MIRI photometry for plotting
-        obs_miri = update_obs_with_miri(objid, obs, phot_table)
+        # Setup MIRI observations only if available
         filters = obs['filters']
-        miri_filters = obs_miri['filters_miri']
-        miri_band_names = obs_miri['filter_code_miri']
+        if has_miri:
+            obs_miri = update_obs_with_miri(objid, obs, phot_table)
+            miri_filters = obs_miri['filters_miri']
+            miri_band_names = obs_miri['filter_code_miri']
+            phot_wave_miri = np.array([filt.wave_effective for filt in miri_filters])
+        else:
+            obs_miri = obs
+            miri_filters = []
+            miri_band_names = []
+            phot_wave_miri = None
         
         # Draw weighted posterior samples
         samples = posterior_samples(results, n_samples)
@@ -203,8 +216,9 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             lir_samples.append(lir_i)
             
             # Compute predicted photometry for MIRI bands for each sample
-            phot_i = get_model_photometry(spec_i, wave_spec, miri_filters, zred)
-            phot_miri_samples.append(phot_i)
+            if has_miri:
+                phot_i = get_model_photometry(spec_i, wave_spec, miri_filters, zred)
+                phot_miri_samples.append(phot_i)
         
         sample_specs = np.array(sample_specs)  # shape: (nsample, nwave)
         lir_samples = np.array(lir_samples)  # shape: (nsample,)
@@ -214,23 +228,7 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         median = np.percentile(sample_specs, 50, axis=0)
         upper = np.percentile(sample_specs, 84, axis=0)    
         
-        # Identify valid MIRI bands from the attached table
-        miri_obs_flux = []
-        miri_obs_err  = []
-        
-        miri_flux_all = obs_miri['maggies_miri'] 
-        miri_err_all  = obs_miri['maggies_unc_miri']
-        
-        for f_o, e_o in zip(miri_flux_all, miri_err_all):
-            miri_obs_flux.append(f_o)
-            miri_obs_err.append(e_o)
-        
-        miri_obs_flux = np.array(miri_obs_flux)
-        miri_obs_err  = np.array(miri_obs_err)
-        
-        # Compute filter wavelength in microns
-        phot_wave      = np.array([filt.wave_effective for filt in filters])  # in Angstroms
-        phot_wave_miri = np.array([filt.wave_effective for filt in miri_filters])  # in Angstroms            
+        phot_wave = np.array([filt.wave_effective for filt in filters])  # in Angstroms
         
         # ------------------------------------------------------------------
         # Section 2: Pulling weighted samples and storing the parameters
@@ -241,14 +239,22 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         log_lir_samples = np.full(n_samples, np.nan)
         log_lir_samples[valid_lir] = np.log10(lir_samples[valid_lir])
         
-        # Get predicted photometry for MIRI bands + errors from the posterior samples
-        phot_miri_best   = get_model_photometry(spec, wave_spec, miri_filters, zred)
-        phot_miri_med = np.nanpercentile(phot_miri_samples, 50, axis=0)
-        phot_miri_16 = np.nanpercentile(phot_miri_samples, 16, axis=0)
-        phot_miri_84 = np.nanpercentile(phot_miri_samples, 84, axis=0)
-        phot_miri_err   = 0.5*(phot_miri_84 - phot_miri_16)          
+        if has_miri:            
+            phot_miri_best = get_model_photometry(spec, wave_spec, miri_filters, zred)
+            phot_miri_med  = np.nanpercentile(phot_miri_samples, 50, axis=0)
+            phot_miri_16   = np.nanpercentile(phot_miri_samples, 16, axis=0)
+            phot_miri_84   = np.nanpercentile(phot_miri_samples, 84, axis=0)
+            phot_miri_err  = 0.5 * (phot_miri_84 - phot_miri_16)
+            phot_wave_miri = np.array([filt.wave_effective for filt in miri_filters])  # in Angstroms   
+        else:
+            phot_miri_best = None
+            phot_miri_med  = None
+            phot_miri_16   = None
+            phot_miri_84   = None
+            phot_miri_err  = None
+            phot_wave_miri = None
                     
-        print("Successfully reconstructed fit...")
+        print("Successfully reconstructed fit...")       
         
         # ------------------------------------------------------------------
         # Section 3: Reconstruct SFH
@@ -388,59 +394,64 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
         # ------------------------------------------------------------------
         fit_quality = {}
         
-        # Compute N_sigma
-        delta = phot_miri_med - miri_obs_flux # change sign here
-        tot_err = np.sqrt(phot_miri_err**2 + miri_obs_err**2)
-        
-        # Compute N_sigma only for valid errors to avoid division by zero
-        valid_err = tot_err > 0
-        N_sigma = np.full_like(delta, np.nan)
-        N_sigma[valid_err] = delta[valid_err] / tot_err[valid_err]
-        
-        # Compute reduced chi-squared for MIRI bands
-        chi2_red_miri = np.nanmean(N_sigma**2) if np.any(np.isfinite(N_sigma)) else np.nan        
-        fit_quality['chi2_red'] = chi2_red_miri
-        
-        for i, band in enumerate(miri_band_names):
-                        
-            f_o = miri_obs_flux[i]
-            e_o = miri_obs_err[i]
-            f_m = phot_miri_best[i] # Use best-fit model flux for comparison
-            f_n = phot_miri_med[i]
-            e_m = phot_miri_err[i]
+        if has_miri:
+            miri_flux_all = obs_miri['maggies_miri'] 
+            miri_err_all  = obs_miri['maggies_unc_miri']
+            miri_obs_flux = np.array(miri_flux_all)
+            miri_obs_err  = np.array(miri_err_all)
             
-            snr = (f_o / e_o) if e_o > 0 else 0
+            delta = phot_miri_med - miri_obs_flux
+            tot_err = np.sqrt(phot_miri_err**2 + miri_obs_err**2)
+            valid_err = tot_err > 0
+            N_sigma = np.full_like(delta, np.nan)
+            N_sigma[valid_err] = delta[valid_err] / tot_err[valid_err]
             
-            # Factional variance
-            frac_var = (e_m / f_m)**2 + (e_o / f_o)**2
-            rel_err = np.sqrt(frac_var)
+            chi2_red_miri = np.nanmean(N_sigma**2) if np.any(np.isfinite(N_sigma)) else np.nan        
+            fit_quality['chi2_red'] = chi2_red_miri
+
+            for i, band in enumerate(miri_band_names):
+                            
+                f_o = miri_obs_flux[i]
+                e_o = miri_obs_err[i]
+                f_m = phot_miri_best[i] # Use best-fit model flux for comparison
+                f_n = phot_miri_med[i]
+                e_m = phot_miri_err[i]
+                
+                snr = (f_o / e_o) if e_o > 0 else 0
+                
+                # Factional variance
+                frac_var = (e_m / f_m)**2 + (e_o / f_o)**2
+                rel_err = np.sqrt(frac_var)
+                
+                # Linear flux ratio + error
+                ratio = f_m / f_o
+                ratio_err = ratio * rel_err
+                
+                # Logarithmic flux ratio + error
+                log_ratio = np.log10(f_m / f_o)    
+                log_ratio_err = (1.0 / np.log(10)) * np.sqrt(frac_var)
             
-            # Linear flux ratio + error
-            ratio = f_m / f_o
-            ratio_err = ratio * rel_err
-            
-            # Logarithmic flux ratio + error
-            log_ratio = np.log10(f_m / f_o)    
-            log_ratio_err = (1.0 / np.log(10)) * np.sqrt(frac_var)
+                
+                fit_quality[band] = {
+                    'galaxy_id': objid,
+                    'zred': zred,
+                    'obs_flux': f_o * maggies_to_muJy,
+                    'obs_err': e_o * maggies_to_muJy,
+                    'mod_flux_best': f_m * maggies_to_muJy,
+                    'mod_flux_med': f_n * maggies_to_muJy,
+                    'mod_err': e_m * maggies_to_muJy,
+                    'n_sigma': N_sigma[i],
+                    'ratio': ratio,
+                    'ratio_err': ratio_err,
+                    'log_ratio': log_ratio,
+                    'log_ratio_err': log_ratio_err,
+                    'snr': snr
+                }            
         
-            
-            fit_quality[band] = {
-                'galaxy_id': objid,
-                'zred': zred,
-                'obs_flux': f_o * maggies_to_muJy,
-                'obs_err': e_o * maggies_to_muJy,
-                'mod_flux_best': f_m * maggies_to_muJy,
-                'mod_flux_med': f_n * maggies_to_muJy,
-                'mod_err': e_m * maggies_to_muJy,
-                'n_sigma': N_sigma[i],
-                'ratio': ratio,
-                'ratio_err': ratio_err,
-                'log_ratio': log_ratio,
-                'log_ratio_err': log_ratio_err,
-                'snr': snr
-            }            
+            print("Computed fit quality statistics")
         
-        print("Computed fit quality statistics")
+        else:
+            fit_quality['chi2_red'] = np.nan
         
         data = {
             # Important metadata
@@ -496,7 +507,8 @@ def analyse_fits(galaxy_ids, phot_table, data_dir, plot_dir=None, stats_dir=None
             pkl.dump(data, f)
         print(f"💾 Saved data to {filename}")
             
-        if plot_dir:
+        if plot_dir and (run != 'nomiri'):
+            print(f"📊 Plotting reconstructed fit for galaxy {objid}...")
             plot_reconstructed_fit(filename, plot_dir)
     
     return 
